@@ -7,7 +7,17 @@
 		"watch": "rbxtsc -w --verbose",
 		"prepublishOnly": "npm run build"
 	},
-	"keywords": [],
+	"keywords": [
+		"rbxts",
+		"roblox-ts",
+		"state management",
+		"fsm",
+		"behavior tree",
+		"bt",
+		"goap",
+		"ai",
+		"blackboard"
+	],
 	"author": "Catargo",
 	"license": "MIT",
 	"types": "out/index.d.ts",
@@ -179,5 +189,5 @@
 		"url": "https://github.com/Velover/state-management-package-rbxts/issues"
 	},
 	"homepage": "https://github.com/Velover/state-management-package-rbxts#readme",
-	"description": ""
+	"description": "A comprehensive state management library for roblox-ts, featuring Finite State Machines (FSM), Behavior Trees (BT), Goal Oriented Action Planning (GOAP), and Blackboard systems."
 }

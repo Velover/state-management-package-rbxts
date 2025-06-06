@@ -1,3 +1,5 @@
+//native
+//optimize 2
 import { Blackboard } from "./Blackboard";
 import { FSM } from "./FSM";
 import { Goap } from "./Goap";

@@ -1,4 +1,6 @@
+import { FSM } from "FSM";
 import { Blackboard } from "./Blackboard";
+import { BTree } from "BehaviorTree";
 
 function AssertNumber(value: unknown): asserts value is number {
 	assert(typeIs(value, "number"), "Expected a number, but got: " + typeOf(value));
@@ -16,9 +18,8 @@ export namespace Goap {
 		SatisfiesRequirements(requirements: Map<string, Requirement>): boolean {
 			for (const [key, requirement] of requirements) {
 				const value = this.GetWild(key);
-				if (value === undefined || !requirement(value)) {
-					return false;
-				}
+				if (value === undefined) return false;
+				if (!requirement(value)) return false;
 			}
 			return true;
 		}
@@ -701,6 +702,52 @@ export namespace Goap {
 
 		protected OnHalt(): void {
 			// Default implementation - can be overridden
+		}
+	}
+
+	export abstract class FSMConnector extends Action {
+		constructor(protected readonly fsm_: FSM.FSM) {
+			super();
+		}
+
+		protected override OnStart(world_state: WorldState): EActionStatus {
+			this.fsm_.Start();
+			return EActionStatus.RUNNING;
+		}
+		protected OnTick(
+			dt: number,
+			world_state: WorldState,
+			active_nodes: Set<Action>,
+		): EActionStatus {
+			this.fsm_.Update(dt);
+			return EActionStatus.RUNNING;
+		}
+		//OnFinish will never be called, as FSMConnector is always running
+		protected override OnHalt(): void {
+			this.fsm_.Stop();
+		}
+	}
+
+	export abstract class BTConnector extends Action {
+		constructor(protected readonly bt_: BTree.BehaviorTree) {
+			super();
+		}
+
+		protected override OnStart(world_state: WorldState): EActionStatus {
+			return EActionStatus.RUNNING;
+		}
+
+		protected override OnTick(
+			dt: number,
+			world_state: WorldState,
+			active_nodes: Set<Action>,
+		): EActionStatus {
+			this.bt_.Tick(dt);
+			return EActionStatus.RUNNING;
+		}
+
+		protected override OnHalt(): void {
+			this.bt_.Halt();
 		}
 	}
 }

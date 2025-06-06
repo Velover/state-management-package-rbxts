@@ -837,6 +837,9 @@ export namespace BTree {
 			this.fsm_.Update(dt);
 			return ENodeStatus.RUNNING;
 		}
+		protected override OnFinish(status: ENodeStatus, bb: Blackboard): void {
+			this.fsm_.Stop();
+		}
 		protected override OnHalt(): void {
 			this.fsm_.Stop();
 		}

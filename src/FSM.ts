@@ -77,7 +77,12 @@ export namespace FSM {
 			this.binding_update_?.(dt, this.blackboard_);
 		}
 
-		AddTransition(from: string, to: string, priority: number, condition?: () => boolean): void {
+		AddTransition(
+			from: string,
+			to: string,
+			priority: number,
+			condition?: (bb: Blackboard) => boolean,
+		): void {
 			const transition: ITransition = {
 				To: to,
 				Priority: priority,
@@ -90,7 +95,7 @@ export namespace FSM {
 			this.transitions_.get(from)?.sort((a, b) => a.Priority < b.Priority);
 		}
 
-		AddAnyTransition(to: string, priority: number, condition?: () => boolean): void {
+		AddAnyTransition(to: string, priority: number, condition?: (bb: Blackboard) => boolean): void {
 			const transition: ITransition = {
 				To: to,
 				Priority: priority,

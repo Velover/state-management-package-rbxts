@@ -1,24 +1,26 @@
+import { HttpService } from "@rbxts/services";
 import { Blackboard } from "./Blackboard";
 
 function AssertNumber(value: unknown): asserts value is number {
-	assert(typeIs(value, "number"), "Expected a number, but got: " + typeOf(value));
+	if (typeIs(value, "number")) return;
+	throw "Expected a number, but got: " + typeOf(value);
 }
 
 function AssertBoolean(value: unknown): asserts value is boolean {
-	assert(typeIs(value, "boolean"), "Expected a boolean, but got: " + typeOf(value));
+	if (typeIs(value, "boolean")) return;
+	throw "Expected a boolean, but got: " + typeOf(value);
 }
 
 export namespace Goap {
 	export type Effect = (other_v: unknown) => unknown;
 	export type Requirement = (other_v: unknown) => boolean;
 
-	export class WorldState extends Blackboard {
+	// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+	export class WorldState<T extends Record<string, unknown> = {}> extends Blackboard<T> {
 		SatisfiesRequirements(requirements: Map<string, Requirement>): boolean {
 			for (const [key, requirement] of requirements) {
 				const value = this.GetWild(key);
-				if (value === undefined || !requirement(value)) {
-					return false;
-				}
+				if (!requirement(value)) return false;
 			}
 			return true;
 		}
@@ -34,6 +36,7 @@ export namespace Goap {
 		// Clone method for planning
 		Clone(): WorldState {
 			const cloned = new WorldState({}, {});
+
 			// Access the protected data_ property properly
 			for (const [key, value] of this.data_) {
 				cloned.SetWild(key, this.DeepClone(value));
@@ -41,33 +44,93 @@ export namespace Goap {
 			return cloned;
 		}
 
-		private DeepClone(obj: unknown): unknown {
-			if (typeIs(obj, "table")) {
-				const clone = table.clone(obj);
-				for (const [key, v] of clone as Map<unknown, unknown>) {
-					clone[key as never] = this.DeepClone(v) as never;
-				}
-				return clone;
+		override Cast<T extends Record<string, unknown>>(): WorldState<T> {
+			return this as unknown as WorldState<T>;
+		}
+
+		public Size(): number {
+			return this.data_.size();
+		}
+
+		public GenerateKey(): string {
+			const keys = new Array(this.data_.size(), "");
+			let i = 0;
+			for (const [k] of this.data_) {
+				keys[i++] = k;
+			}
+			keys.sort();
+
+			const obj: Record<string, unknown> = {};
+			for (const key of keys) {
+				obj[key] = this.data_.get(key);
 			}
 
-			return obj;
+			return HttpService.JSONEncode(obj);
+		}
+
+		// Enhanced distance calculation with weights
+		CalculateWeightedDistance(goal: Goal): number {
+			let total_distance = 0;
+			for (const [key, requirement] of goal.RequirementsMap) {
+				const value = this.GetWild(key);
+				const weight = goal.GetRequirementWeight(key);
+				if (!requirement(value)) total_distance += weight;
+			}
+			return total_distance;
+		}
+
+		public Equals(target: WorldState): boolean {
+			const target_data = target.data_;
+			if (target_data.size() !== this.data_.size()) return false;
+
+			for (const [k, v] of target.data_) {
+				if (this.data_.get(k) !== v) return false;
+			}
+
+			return true;
+		}
+
+		private DeepClone(obj: unknown): unknown {
+			if (typeOf(obj) !== "table") return obj;
+
+			const cloned: Record<string, unknown> = {};
+			for (const [k, v] of obj as unknown as Map<string, unknown>) {
+				cloned[k] = this.DeepClone(v);
+			}
+			return cloned;
 		}
 	}
 
 	export class WorldStateSet {
+		private readonly MAX_KEYS_SIZE_FOR_STRINGFICATION = 10;
 		private states_: WorldState[] = [];
+		private states_set_ = new Set<string>();
 		Add(state: WorldState): void {
+			if (state.Size() < this.MAX_KEYS_SIZE_FOR_STRINGFICATION) {
+				this.states_set_.add(state.GenerateKey());
+				return;
+			}
+
 			if (!this.Has(state)) this.states_.push(state);
 		}
 
 		Has(state: WorldState): boolean {
+			if (state.Size() < this.MAX_KEYS_SIZE_FOR_STRINGFICATION) {
+				return this.states_set_.has(state.GenerateKey());
+			}
 			return this.states_.some((s) => s.Equals(state));
 		}
 
 		Delete(state: WorldState): boolean {
+			if (state.Size() < this.MAX_KEYS_SIZE_FOR_STRINGFICATION) {
+				return this.states_set_.delete(state.GenerateKey());
+			}
 			const index = this.states_.findIndex((s) => s.Equals(state));
-			this.states_.remove(index);
-			return index !== -1;
+			if (index !== -1) {
+				this.states_.remove(index);
+				return true;
+			}
+			return false;
 		}
 	}
 
@@ -85,87 +148,116 @@ export namespace Goap {
 
 	// Goal represents what the agent wants to achieve
 	export class Goal {
-		public name: string;
-		public priority: number;
-		public requirements: Map<string, Requirement>;
+		public Name: string;
+		public RequirementsMap = new Map<string, Requirement>();
+		private priority_v_: number = 1;
+		private priority_func_?: (world_state: WorldState, agent: Agent) => number;
+		private requirement_weights_ = new Map<string, number>();
+		private sub_goals_: Goal[] = [];
+		private is_composite_: boolean = false;
 
-		constructor(name: string, priority: number = 1) {
-			this.name = name;
-			this.priority = priority;
-			this.requirements = new Map();
+		constructor(
+			name: string,
+			priority?: ((world_state: WorldState, agent: Agent) => number) | number,
+			is_composite: boolean = false,
+		) {
+			this.Name = name;
+			this.is_composite_ = is_composite;
+			if (typeIs(priority, "function")) {
+				this.priority_func_ = priority;
+			} else if (typeIs(priority, "number")) {
+				this.priority_v_ = priority;
+			}
 		}
 
-		AddRequirement(key: string, requirement: Requirement): Goal {
-			this.requirements.set(key, requirement);
+		public GetPriority(world_state: WorldState, agent: Agent): number {
+			return this.priority_func_?.(world_state, agent) ?? this.priority_v_;
+		}
+
+		AddRequirement(key: string, requirement: Requirement, weight: number = 1): Goal {
+			this.RequirementsMap.set(key, requirement);
+			this.requirement_weights_.set(key, weight);
 			return this;
 		}
 
-		IsSatisfied(world_state: WorldState): boolean {
-			return world_state.SatisfiesRequirements(this.requirements);
+		GetRequirementWeight(key: string): number {
+			return this.requirement_weights_.get(key) ?? 1;
 		}
 
-		// Calculate how close we are to achieving this goal (0 = achieved, higher = further)
-		CalculateDistance(world_state: WorldState): number {
-			let unsatisfied = 0;
-			for (const [key, requirement] of this.requirements) {
-				const value = world_state.GetWild(key);
-				if (value === undefined || !requirement(value)) unsatisfied++;
+		// Hierarchical goal support
+		AddSubGoal(goal: Goal): Goal {
+			this.sub_goals_.push(goal);
+			return this;
+		}
+
+		GetSubGoals(): Goal[] {
+			return [...this.sub_goals_];
+		}
+
+		IsComposite(): boolean {
+			return this.is_composite_;
+		}
+
+		DecomposeIntoSubgoals(): Goal[] {
+			return this.sub_goals_.size() > 0 ? this.GetSubGoals() : [this];
+		}
+
+		IsSatisfied(world_state: WorldState): boolean {
+			if (this.is_composite_) {
+				return this.sub_goals_.every((goal) => goal.IsSatisfied(world_state));
 			}
-			return unsatisfied;
+			return world_state.SatisfiesRequirements(this.RequirementsMap);
+		}
+
+		// Enhanced distance calculation with weights
+		CalculateDistance(world_state: WorldState): number {
+			if (!this.is_composite_) {
+				return world_state.CalculateWeightedDistance(this);
+			}
+			return this.sub_goals_.reduce(
+				(total, goal) => total + goal.CalculateDistance(world_state),
+				0,
+			);
 		}
 	}
 
 	// Plan represents a sequence of actions to achieve a goal
 	export class Plan {
-		public actions: Action[];
-		public cost: number;
-		public goal: Goal;
-
-		constructor(goal: Goal, actions: Action[] = [], cost: number = 0) {
-			this.goal = goal;
-			this.actions = actions;
-			this.cost = cost;
-		}
+		constructor(
+			public Goal: Goal,
+			public Actions: Action[] = [],
+			public Cost: number = 0,
+		) {}
 
 		IsEmpty(): boolean {
-			return this.actions.size() === 0;
+			return this.Actions.size() === 0;
 		}
 
 		GetNextAction(): Action | undefined {
-			return this.actions[0];
+			return this.Actions[0];
 		}
 
 		PopAction(): Action | undefined {
-			return this.actions.shift();
+			return this.Actions.shift();
 		}
 
 		Clone(): Plan {
-			return new Plan(this.goal, [...this.actions], this.cost);
+			return new Plan(this.Goal, [...this.Actions], this.Cost);
 		}
 	}
 
 	// Node for A* search algorithm
 	class PlanNode {
-		public WorldState: WorldState;
-		public Action?: Action;
-		public Parent?: PlanNode;
-		public GCost: number; // Cost from start
-		public HCost: number; // Heuristic cost to goal
 		public FCost: number; // Total cost
 
 		constructor(
-			world_state: WorldState,
-			action?: Action,
-			parent?: PlanNode,
-			g_cost: number = 0,
-			h_cost: number = 0,
+			public WorldState: WorldState,
+			public Action?: Action,
+			public Parent?: PlanNode,
+			public GCost: number = 0,
+			public HCost: number = 0,
 		) {
-			this.WorldState = world_state;
-			this.Action = action;
-			this.Parent = parent;
-			this.GCost = g_cost;
-			this.HCost = h_cost;
-			this.FCost = g_cost + h_cost;
+			this.FCost = this.GCost + this.HCost;
 		}
 
 		// Reconstruct the path from start to this node
@@ -179,7 +271,7 @@ export namespace Goap {
 				current = current.Parent;
 			}
 
-			//reverse the path
+			//inline reverse to avoid extra array allocation
 			for (let i = 0, j = path.size() - 1; i < j; i++, j--) {
 				[path[i], path[j]] = [path[j], path[i]];
 			}
@@ -190,32 +282,32 @@ export namespace Goap {
 
 	// Priority queue for A* algorithm
 	class PriorityQueue<T> {
-		private items: Array<{ item: T; priority: number }> = [];
+		private items_: Array<{ item: T; priority: number }> = [];
 
 		Enqueue(item: T, priority: number): void {
-			this.items.push({ item, priority });
-			this.items.sort((a, b) => a.priority < b.priority);
+			this.items_.push({ item, priority });
+			this.items_.sort((a, b) => a.priority < b.priority);
 		}
 
 		Dequeue(): T | undefined {
-			const item = this.items.shift();
+			const item = this.items_.shift();
 			return item?.item;
 		}
 
 		IsEmpty(): boolean {
-			return this.items.size() === 0;
+			return this.items_.size() === 0;
 		}
 
 		Contains(predicate: (item: T) => boolean): boolean {
-			return this.items.some((entry) => predicate(entry.item));
+			return this.items_.some((entry) => predicate(entry.item));
 		}
 
 		Replace(predicate: (item: T) => boolean, new_item: T, new_priority: number): boolean {
-			const index = this.items.findIndex((entry) => predicate(entry.item));
+			const index = this.items_.findIndex((entry) => predicate(entry.item));
 			if (index === -1) return false;
 
-			this.items[index] = { item: new_item, priority: new_priority };
-			this.items.sort((a, b) => a.priority < b.priority);
+			this.items_[index] = { item: new_item, priority: new_priority };
+			this.items_.sort((a, b) => a.priority < b.priority);
 			return true;
 		}
 	}
@@ -233,6 +325,11 @@ export namespace Goap {
 			goal: Goal,
 			available_actions: Action[],
 		): Plan | undefined {
+			// Handle composite goals
+			if (goal.IsComposite()) {
+				return this.CreateHierarchicalPlan(current_state, goal, available_actions);
+			}
+
 			// If goal is already satisfied, return empty plan
 			if (goal.IsSatisfied(current_state)) return new Plan(goal);
 
@@ -288,7 +385,7 @@ export namespace Goap {
 
 					const new_node = new PlanNode(new_state, action, current_node, g_cost, h_cost);
 
-					// Check if this path to newState is better than unknown existing one
+					// Check if this path to newState is better than any existing one
 					const exists_in_open = open_set.Contains((node) => node.WorldState.Equals(new_state));
 
 					if (!exists_in_open) {
@@ -307,6 +404,34 @@ export namespace Goap {
 
 			// No plan found
 			return undefined;
+		}
+
+		private CreateHierarchicalPlan(
+			current_state: WorldState,
+			composite_goal: Goal,
+			available_actions: Action[],
+		): Plan | undefined {
+			const sub_goals = composite_goal.DecomposeIntoSubgoals();
+			const combined_actions: Action[] = [];
+			let total_cost = 0;
+			const current_work_state = current_state.Clone();
+
+			for (const sub_goal of sub_goals) {
+				const sub_plan = this.CreatePlan(current_work_state, sub_goal, available_actions);
+				if (sub_plan === undefined) return;
+
+				for (const action of sub_plan.Actions) {
+					combined_actions.push(action);
+				}
+				total_cost += sub_plan.Cost;
+
+				// Apply sub-plan effects to working state
+				for (const action of sub_plan.Actions) {
+					current_work_state.ApplyEffects(action.GetStaticEffects(current_work_state));
+				}
+			}
+
+			return new Plan(composite_goal, combined_actions, total_cost);
 		}
 	}
 
@@ -338,19 +463,23 @@ export namespace Goap {
 			this.goals_.push(goal);
 		}
 
+		GetGoals(): Goal[] {
+			return [...this.goals_];
+		}
+
 		RemoveGoal(goal_name: string): void {
-			const goal_index = this.goals_.findIndex((goal) => goal.name === goal_name);
+			const goal_index = this.goals_.findIndex((goal) => goal.Name === goal_name);
 			this.goals_.remove(goal_index);
 
-			if (this.current_goal_?.name === goal_name) {
+			if (this.current_goal_?.Name === goal_name) {
 				this.current_goal_ = undefined;
 				this.current_plan_ = undefined;
 			}
 		}
 
 		// Main update loop
-		Update(dt: number): void {
-			this.planning_cooldown_ -= dt;
+		Update(dt_s: number): void {
+			this.planning_cooldown_ -= dt_s;
 
 			// Clear finished actions from active set
 			for (const action of this.active_nodes_) {
@@ -364,7 +493,7 @@ export namespace Goap {
 			if (this.current_plan_.IsEmpty()) return;
 
 			// Execute current plan
-			this.ExecuteCurrentPlan(dt, this.world_state_);
+			this.ExecuteCurrentPlan(dt_s, this.world_state_);
 		}
 
 		private ShouldReplan(): boolean {
@@ -395,13 +524,16 @@ export namespace Goap {
 				return;
 			}
 
+			const start = os.clock();
 			// Create plan for the goal
 			const plan = this.planner_.CreatePlan(this.world_state_, best_goal, this.available_actions_);
+			const finish = os.clock();
+			print(finish - start, "Took to create a plan");
 
 			if (plan !== undefined) {
 				this.current_plan_ = plan;
 				this.current_goal_ = best_goal;
-				print(`New plan created for goal: ${best_goal.name} with ${plan.actions.size()} actions`);
+				print(`New plan created for goal: ${best_goal.Name} with ${plan.Actions.size()} actions`);
 				return;
 			}
 
@@ -410,25 +542,25 @@ export namespace Goap {
 		}
 
 		private FindBestGoal(): Goal | undefined {
-			let bestGoal: Goal | undefined;
-			let bestScore = -math.huge;
+			let best_goal: Goal | undefined;
+			let best_score = -math.huge;
 
 			for (const goal of this.goals_) {
 				// Skip already satisfied goals
 				if (goal.IsSatisfied(this.world_state_)) continue;
 
 				// Simple scoring: higher priority is better
-				const score = goal.priority;
-				if (score <= bestScore) continue;
+				const score = goal.GetPriority(this.world_state_, this);
+				if (score <= best_score) continue;
 
-				bestScore = score;
-				bestGoal = goal;
+				best_score = score;
+				best_goal = goal;
 			}
 
-			return bestGoal;
+			return best_goal;
 		}
 
-		private ExecuteCurrentPlan(dt: number, current_state: WorldState): void {
+		private ExecuteCurrentPlan(dt_s: number, current_state: WorldState): void {
 			if (this.current_plan_ === undefined) return;
 			if (this.current_plan_.IsEmpty()) return;
 
@@ -446,10 +578,14 @@ export namespace Goap {
 			}
 
 			// Execute the action
-			const status = current_action.Tick(dt, this.world_state_, this.active_nodes_);
+			const status = current_action.Tick(dt_s, this.world_state_, this.active_nodes_);
 
 			if (status === EActionStatus.SUCCESS) {
-				print("Action completed successfully");
+				// Apply the action's effects to the world state
+				const effects = current_action.GetStaticEffects(this.world_state_);
+				this.world_state_.ApplyEffects(effects);
+
+				print("Action completed successfully - effects applied");
 				this.current_plan_.PopAction();
 			} else if (status === EActionStatus.FAILURE) {
 				print("Action failed, replanning...");
@@ -461,8 +597,8 @@ export namespace Goap {
 		private StopCurrentPlan(): void {
 			if (this.current_plan_ === undefined) return;
 
-			// Halt unknown running actions
-			for (const action of this.current_plan_.actions) {
+			// Halt any running actions
+			for (const action of this.current_plan_.Actions) {
 				if (action.IsRunning()) action.Halt();
 			}
 		}
@@ -486,7 +622,7 @@ export namespace Goap {
 
 		// Add a method to adjust planning interval dynamically
 		SetPlanningInterval(interval_s: number): void {
-			if (interval_s <= 0) {
+			if (interval_s < 0) {
 				warn("Planning interval must be positive, using default value");
 				return;
 			}
@@ -527,23 +663,23 @@ export namespace Goap {
 			(other_v: unknown) => {
 				return other_v !== value;
 			},
-		Is: (): ((v: boolean) => boolean) => (other_v: unknown) => {
+		Is: (): Requirement => (other_v: unknown) => {
 			AssertBoolean(other_v);
 			return other_v;
 		},
-		IsNot: (): ((v: boolean) => boolean) => (other_v: unknown) => {
+		IsNot: (): Requirement => (other_v: unknown) => {
 			AssertBoolean(other_v);
 			return !other_v;
 		},
 		IsIn:
 			(values: defined[]): Requirement =>
 			(other_v: unknown) => {
-				return values.includes(other_v as never);
+				return values.includes(other_v!);
 			},
 		IsNotIn:
 			(values: defined[]): Requirement =>
 			(other_v: unknown) => {
-				return !values.includes(other_v as never);
+				return !values.includes(other_v!);
 			},
 		InRange:
 			(min: number, max: number): Requirement =>
@@ -569,52 +705,71 @@ export namespace Goap {
 	};
 
 	export const Effect = {
+		IncrementClamp:
+			(v: number, min: number, max: number): Effect =>
+			(other_v: unknown = 0) => {
+				const current = other_v;
+				AssertNumber(current);
+				const newValue = current + v;
+				if (newValue < min) return min;
+				if (newValue > max) return max;
+				return newValue;
+			},
+		DecrementClamp:
+			(v: number, min: number, max: number): Effect =>
+			(other_v: unknown = 0) => {
+				const current = other_v;
+				AssertNumber(current);
+				const newValue = current - v;
+				if (newValue < min) return min;
+				if (newValue > max) return max;
+				return newValue;
+			},
 		Decrement:
 			(value: number = 1): Effect =>
-			(other_v: unknown) => {
-				AssertNumber(other_v);
-				return other_v - value;
+			(other_v: unknown = 0) => {
+				const current = other_v;
+				AssertNumber(current);
+				return current - value;
 			},
 		Increment:
 			(value: number = 1): Effect =>
-			(other_v: unknown) => {
-				AssertNumber(other_v);
-				return other_v + value;
+			(other_v: unknown = 0) => {
+				const current = other_v;
+				AssertNumber(current);
+				return current + value;
 			},
 		Insert:
 			(v: defined): Effect =>
 			(other_v: unknown) => {
-				assert(
-					typeIs(other_v, "table"),
-					"Insert effect can only be applied to arrays, but got: " + typeOf(other_v),
-				);
+				if (!typeIs(other_v, "table")) {
+					throw "Insert effect can only be applied to arrays, but got: " + typeOf(other_v);
+				}
 				(other_v as defined[]).push(v);
-				return other_v;
+				return other_v as unknown[];
 			},
 		Remove:
-			(v: defined): Effect =>
+			(value: defined): Effect =>
 			(other_v: unknown) => {
-				assert(
-					typeIs(other_v, "table"),
-					"Remove effect can only be applied to arrays, but got: " + typeOf(other_v),
-				);
-
-				const other_v_array = other_v as defined[];
-				other_v_array.remove(other_v_array.indexOf(v));
-				return other_v;
+				if (!typeIs(other_v, "table"))
+					throw "Remove effect can only be applied to arrays, but got: " + typeOf(other_v);
+				(other_v as defined[]).remove((other_v as defined[]).indexOf(value));
+				return other_v as unknown[];
 			},
 		Multiply:
 			(v: number): Effect =>
-			(other_v: unknown) => {
-				AssertNumber(other_v);
-				return other_v * v;
+			(other_v: unknown = 0) => {
+				const current = other_v;
+				AssertNumber(current);
+				return current * v;
 			},
 		Divide:
 			(v: number): Effect =>
-			(other_v: unknown) => {
-				AssertNumber(other_v);
+			(other_v: unknown = 0) => {
+				const current = other_v;
+				AssertNumber(current);
 				if (v === 0) throw "Division by zero is not allowed.";
-				return other_v / v;
+				return current / v;
 			},
 		Set:
 			(value: unknown): Effect =>
@@ -622,9 +777,9 @@ export namespace Goap {
 				return value;
 			},
 		Toggle: (): Effect => (other_v: unknown) => {
-			if (typeIs(other_v, "boolean")) {
+			if (typeOf(other_v) === "boolean") {
 				return !other_v;
-			} else if (typeIs(other_v, "number")) {
+			} else if (typeOf(other_v) === "number") {
 				return other_v === 0 ? 1 : 0;
 			}
 			throw "Toggle effect can only be applied to boolean or number types.";
@@ -639,7 +794,7 @@ export namespace Goap {
 
 		protected state_: EActionState = EActionState.IDLE;
 
-		public Tick(dt: number, world_state: WorldState, active_nodes: Set<Action>): EActionStatus {
+		public Tick(dt_s: number, world_state: WorldState, active_nodes: Set<Action>): EActionStatus {
 			if (this.state_ === EActionState.IDLE) {
 				this.state_ = EActionState.RUNNING;
 				const startStatus = this.OnStart(world_state);
@@ -652,7 +807,7 @@ export namespace Goap {
 			}
 
 			if (this.state_ === EActionState.RUNNING) {
-				const status = this.OnTick(dt, world_state, active_nodes);
+				const status = this.OnTick(dt_s, world_state, active_nodes);
 
 				if (status === EActionStatus.RUNNING) {
 					active_nodes.add(this);
@@ -686,7 +841,7 @@ export namespace Goap {
 		}
 
 		protected abstract OnTick(
-			dt: number,
+			dt_s: number,
 			world_state: WorldState,
 			active_nodes: Set<Action>,
 		): EActionStatus;

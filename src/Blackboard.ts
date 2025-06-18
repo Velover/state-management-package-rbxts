@@ -3,10 +3,10 @@ export class Blackboard<TRecord extends object = object> {
 
 	constructor(initial_data: TRecord, wild_data: Record<string, unknown> = {}) {
 		if (initial_data === undefined) return;
-		for (const [k, v] of initial_data as Map<unknown, unknown>) {
-			this.data_.set(k as never, v);
+		for (const [k, v] of initial_data as unknown as Map<string, unknown>) {
+			this.data_.set(k, v);
 		}
-		for (const [k, v] of pairs(wild_data)) {
+		for (const [k, v] of wild_data as unknown as Map<string, unknown>) {
 			this.data_.set(k, v);
 		}
 	}
@@ -19,8 +19,16 @@ export class Blackboard<TRecord extends object = object> {
 		this.data_.set(key as never, value);
 	}
 
-	public SetWild(key: string, value: unknown): void {
+	public SetWild<T>(key: string, value: T): T {
 		this.data_.set(key, value);
+		return value;
+	}
+
+	public UpdateWild<T>(key: string, callback: (v: T | undefined) => T): T {
+		const current_value = this.data_.get(key) as T | undefined;
+		const new_value = callback(current_value);
+		this.data_.set(key, new_value);
+		return new_value;
 	}
 
 	public Get<T extends keyof TRecord>(key: T): TRecord[T] {
@@ -31,7 +39,7 @@ export class Blackboard<TRecord extends object = object> {
 		return this.data_.get(key) as T | undefined;
 	}
 
-	public GetOrDefaultWild<T>(key: string, default_value: T): T {
+	public GetWildOrDefault<T>(key: string, default_value: T): T {
 		return (this.data_.get(key) as T | undefined) ?? default_value;
 	}
 
@@ -61,16 +69,5 @@ export class Blackboard<TRecord extends object = object> {
 			return default_value;
 		}
 		return value as T;
-	}
-
-	public Equals(target: Blackboard): boolean {
-		const target_data = target.data_;
-		if (target_data.size() !== this.data_.size()) return false;
-
-		for (const [k, v] of target.data_) {
-			if (this.data_.get(k) !== v) return false;
-		}
-
-		return true;
 	}
 }

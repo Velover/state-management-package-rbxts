@@ -1,6 +1,6 @@
-import { Blackboard } from "./Blackboard";
 import { FSM } from "./FSM";
-import { Goap } from "./Goap";
+import { Blackboard } from "./Blackboard";
+import type { Goap } from "./Goap";
 
 export namespace BTree {
 	// Core enums and interfaces
@@ -16,6 +16,11 @@ export namespace BTree {
 		HALTED,
 	}
 
+	export const enum EParallelPolicy {
+		ONE,
+		ALL,
+	}
+
 	// Base node class
 	export abstract class Node {
 		protected state_: ENodeState = ENodeState.IDLE;
@@ -23,12 +28,12 @@ export namespace BTree {
 		public Tick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
 			if (this.state_ === ENodeState.IDLE) {
 				this.state_ = ENodeState.RUNNING;
-				const startStatus = this.OnStart(bb);
+				const start_status = this.OnStart(bb);
 
-				if (startStatus !== ENodeStatus.RUNNING) {
+				if (start_status !== ENodeStatus.RUNNING) {
 					this.state_ = ENodeState.IDLE;
-					this.OnFinish(startStatus, bb);
-					return startStatus;
+					this.OnFinish(start_status, bb);
+					return start_status;
 				}
 			}
 
@@ -78,9 +83,8 @@ export namespace BTree {
 			// Default implementation - can be overridden
 		}
 
-		protected OnHalt(): void {
-			// Default implementation - can be overridden
-		}
+		/** Default implementation - can be overridden*/
+		protected OnHalt(): void {}
 	}
 
 	// Composite nodes (can have multiple children)
@@ -174,9 +178,7 @@ export namespace BTree {
 		private current_index_ = 0;
 
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			if (this.children_.size() === 0) {
-				return ENodeStatus.SUCCESS;
-			}
+			if (this.children_.size() === 0) return ENodeStatus.SUCCESS;
 
 			for (let i = this.current_index_; i < this.children_.size(); i++) {
 				const status = this.children_[i].Tick(dt, bb, active_nodes);
@@ -257,7 +259,7 @@ export namespace BTree {
 			return ENodeStatus.FAILURE;
 		}
 
-		// protected override OnHalt(): void {
+		// protected override  OnHalt(): void {
 		//   super.OnHalt();
 		//   // Memory fallback keeps its index on halt
 		// }
@@ -271,29 +273,29 @@ export namespace BTree {
 	// Parallel - runs all children simultaneously
 	export class Parallel extends Composite {
 		constructor(
-			private success_policy_: "one" | "all" = "all",
-			private failure_policy_: "one" | "all" = "one",
+			private success_policy_: EParallelPolicy = EParallelPolicy.ALL,
+			private failure_policy_: EParallelPolicy = EParallelPolicy.ONE,
 		) {
 			super();
 		}
 
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			let successCount = 0;
-			let failureCount = 0;
+			let success_count = 0;
+			let failure_count = 0;
 
 			for (const child of this.children_) {
 				const status = child.Tick(dt, bb, active_nodes);
 
 				if (status === ENodeStatus.SUCCESS) {
-					successCount++;
-					if (this.success_policy_ === "one") {
+					success_count++;
+					if (this.success_policy_ === EParallelPolicy.ONE) {
 						// Halt other children
 						this.HaltOtherChildren(child);
 						return ENodeStatus.SUCCESS;
 					}
 				} else if (status === ENodeStatus.FAILURE) {
-					failureCount++;
-					if (this.failure_policy_ === "one") {
+					failure_count++;
+					if (this.failure_policy_ === EParallelPolicy.ONE) {
 						// Halt other children
 						this.HaltOtherChildren(child);
 						return ENodeStatus.FAILURE;
@@ -301,11 +303,11 @@ export namespace BTree {
 				}
 			}
 
-			if (this.success_policy_ === "all" && successCount === this.children_.size()) {
+			if (this.success_policy_ === EParallelPolicy.ALL && success_count === this.children_.size()) {
 				return ENodeStatus.SUCCESS;
 			}
 
-			if (this.failure_policy_ === "all" && failureCount === this.children_.size()) {
+			if (this.failure_policy_ === EParallelPolicy.ALL && failure_count === this.children_.size()) {
 				return ENodeStatus.FAILURE;
 			}
 
@@ -379,23 +381,24 @@ export namespace BTree {
 
 	// Timeout - fails child if it takes longer than specified time
 	export class Timeout extends Decorator {
-		private timeout_s_: number;
-		private start_time_: number = 0;
+		private time_left_: number = 0;
 
-		constructor(child: Node, timeout_s: number) {
+		constructor(
+			child: Node,
+			private readonly timeout_s_: number,
+		) {
 			super(child);
-			this.timeout_s_ = timeout_s;
 		}
 
 		protected override OnStart(bb: Blackboard): ENodeStatus {
-			this.start_time_ = os.clock();
+			this.time_left_ = this.timeout_s_;
 			return ENodeStatus.RUNNING;
 		}
 
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			const elapsed = os.clock() - this.start_time_;
+			this.time_left_ -= dt;
 
-			if (elapsed >= this.timeout_s_) {
+			if (this.time_left_ <= 0) {
 				this.child_.Halt();
 				return ENodeStatus.FAILURE;
 			}
@@ -742,71 +745,68 @@ export namespace BTree {
 
 	// Wait - waits for a specified duration
 	export class Wait extends Node {
-		private start_time_ = 0;
+		private time_left_ = 0;
 
 		constructor(private duration_s_: number) {
 			super();
 		}
 
 		protected override OnStart(bb: Blackboard): ENodeStatus {
-			this.start_time_ = os.clock();
+			this.time_left_ = this.duration_s_;
 			return ENodeStatus.RUNNING;
 		}
 
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			const current_time = os.clock();
-			const elapsed_time = current_time - this.start_time_;
+			this.time_left_ -= dt;
 
-			if (elapsed_time >= this.duration_s_) {
+			if (this.time_left_ <= 0) {
 				return ENodeStatus.SUCCESS;
 			}
 
 			return ENodeStatus.RUNNING;
 		}
-
-		protected override OnHalt(): void {
-			this.start_time_ = 0;
-		}
-
-		protected override OnFinish(status: ENodeStatus, bb: Blackboard): void {
-			this.start_time_ = 0;
-		}
 	}
 
 	// Cooldown - enforces a cooldown period after child execution
 	export class Cooldown extends Decorator {
-		private last_execution_time_ = 0;
+		private time_left_ = 0;
 
 		constructor(
 			child: Node,
 			private cooldown_s_: number,
+			private reset_on_halt_: boolean = false,
 		) {
 			super(child);
 		}
 
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			const current_time = os.clock();
+			this.time_left_ -= dt;
 
-			if (
-				this.last_execution_time_ === 0 ||
-				current_time - this.last_execution_time_ >= this.cooldown_s_
-			) {
-				const status = this.child_.Tick(dt, bb, active_nodes);
+			if (this.time_left_ > 0) return ENodeStatus.FAILURE;
+			const status = this.child_.Tick(dt, bb, active_nodes);
+			return status;
+		}
 
-				if (status !== ENodeStatus.RUNNING) {
-					this.last_execution_time_ = current_time;
-				}
-
-				return status;
-			}
-
-			return ENodeStatus.FAILURE;
+		protected override OnHalt(): void {
+			super.OnHalt();
+			if (!this.reset_on_halt_) return;
+			this.time_left_ = this.cooldown_s_;
 		}
 
 		protected override OnFinish(status: ENodeStatus, bb: Blackboard): void {
-			if (status !== ENodeStatus.RUNNING) {
-				this.last_execution_time_ = os.clock();
-			}
+			this.time_left_ = this.cooldown_s_;
+		}
+	}
+
+	export class Timer extends Node {
+		constructor(private readonly key_name_: string) {
+			super();
+		}
+
+		protected override OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+			if (!bb.HasWild(this.key_name_)) return ENodeStatus.FAILURE;
+			const time_left = bb.UpdateWild<number>(this.key_name_, (v) => v! - dt);
+			return time_left <= 0 ? ENodeStatus.SUCCESS : ENodeStatus.FAILURE;
 		}
 	}
 

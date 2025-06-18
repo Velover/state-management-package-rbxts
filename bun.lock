@@ -3,6 +3,9 @@
   "workspaces": {
     "": {
       "name": "@rbxts/state-management-package-rbxts",
+      "dependencies": {
+        "@rbxts/services": "^1.5.5",
+      },
       "devDependencies": {
         "@rbxts/compiler-types": "^3.0.0-types.0",
         "@rbxts/types": "^1.0.857",
@@ -42,6 +45,8 @@
     "@pkgr/core": ["@pkgr/core@0.2.7", "", {}, "sha512-YLT9Zo3oNPJoBjBc4q8G2mjU4tqIbf5CEOORbUUr48dCD9q3umJ3IPlVqOqDakPfd2HuwccBaqlGhN4Gmr5OWg=="],
 
     "@rbxts/compiler-types": ["@rbxts/compiler-types@3.0.0-types.0", "", {}, "sha512-VGOHJPoL7+56NTatMGqQj3K7xWuzEV+aP4QD5vZiHu+bcff3kiTmtoadaF6NkJrmwfFAvbsd4Dg764ZjWNceag=="],
+
+    "@rbxts/services": ["@rbxts/services@1.5.5", "", {}, "sha512-Hu7QH2ecefS60zpakKG3T2vgABydoOJqpSG7nXr59wFAbPk/cA+OcsntYPHUWyHAat0VFGZ5jNZLTLdiqfssvg=="],
 
     "@rbxts/types": ["@rbxts/types@1.0.857", "", {}, "sha512-cTUQi54ATRSStxE45vG9MOOhd3rsjaz0k6zwZckNABkj8NykyxvzSLPU8jv9jdNrisYN37t2xhEhWUF3sVzg5w=="],
 

@@ -1,6 +1,6 @@
 import { BTree } from "./BehaviorTree";
 import { Blackboard } from "./Blackboard";
-import { Goap } from "./Goap";
+import type { Goap } from "./Goap";
 
 interface ITransition {
 	To: string;
@@ -17,7 +17,7 @@ export namespace FSM {
 
 		private binding_on_enter_?: (bb: Blackboard) => void;
 		private binding_on_exit_?: (bb: Blackboard) => void;
-		private binding_update_?: (dt: number, bb: Blackboard) => void;
+		private binding_update_?: (dt_s: number, bb: Blackboard) => void;
 
 		constructor(
 			private readonly default_state_: string,
@@ -75,7 +75,12 @@ export namespace FSM {
 			this.binding_update_?.(dt, this.blackboard_);
 		}
 
-		AddTransition(from: string, to: string, priority: number, condition?: () => boolean): void {
+		AddTransition(
+			from: string,
+			to: string,
+			priority: number,
+			condition?: (bb: Blackboard) => boolean,
+		): void {
 			const transition: ITransition = {
 				To: to,
 				Priority: priority,
@@ -88,7 +93,7 @@ export namespace FSM {
 			this.transitions_.get(from)?.sort((a, b) => a.Priority < b.Priority);
 		}
 
-		AddAnyTransition(to: string, priority: number, condition?: () => boolean): void {
+		AddAnyTransition(to: string, priority: number, condition?: (bb: Blackboard) => boolean): void {
 			const transition: ITransition = {
 				To: to,
 				Priority: priority,
@@ -112,8 +117,8 @@ export namespace FSM {
 	export class BehaviorTreeConnector implements IFSMState {
 		constructor(private readonly tree_: BTree.BehaviorTree) {}
 		OnEnter(bb: Blackboard): void {}
-		Update(dt: number): void {
-			this.tree_.Tick(dt);
+		Update(dt_s: number): void {
+			this.tree_.Tick(dt_s);
 		}
 		OnExit(): void {
 			this.tree_.Halt();
@@ -123,8 +128,8 @@ export namespace FSM {
 	export class GOAPConnector implements IFSMState {
 		constructor(private readonly goap_: Goap.Agent) {}
 		OnEnter(bb: Blackboard): void {}
-		Update(dt: number): void {
-			this.goap_.Update(dt);
+		Update(dt_s: number): void {
+			this.goap_.Update(dt_s);
 		}
 		OnExit(): void {
 			this.goap_.Reset();
@@ -133,7 +138,7 @@ export namespace FSM {
 
 	export interface IFSMState {
 		OnEnter(bb: Blackboard): void;
-		Update(dt: number, bb: Blackboard): void;
+		Update(dt_s: number, bb: Blackboard): void;
 		OnExit(bb: Blackboard): void;
 	}
 }

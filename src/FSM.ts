@@ -1,3 +1,5 @@
+//native
+//optimize 2
 import { BTree } from "./BehaviorTree";
 import { Blackboard } from "./Blackboard";
 import type { Goap } from "./Goap";

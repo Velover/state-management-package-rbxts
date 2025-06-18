@@ -1,3 +1,5 @@
+//native
+//optimize 2
 import { FSM } from "./FSM";
 import { Blackboard } from "./Blackboard";
 import type { Goap } from "./Goap";
@@ -836,6 +838,9 @@ export namespace BTree {
 		protected override OnTick(dt: number): ENodeStatus {
 			this.fsm_.Update(dt);
 			return ENodeStatus.RUNNING;
+		}
+		protected override OnFinish(status: ENodeStatus, bb: Blackboard): void {
+			this.fsm_.Stop();
 		}
 		protected override OnHalt(): void {
 			this.fsm_.Stop();

@@ -1,5 +1,9 @@
-import { HttpService } from "@rbxts/services";
+//native
+//optimize 2
+import { FSM } from "FSM";
 import { Blackboard } from "./Blackboard";
+import { BTree } from "BehaviorTree";
+import { HttpService } from "@rbxts/services";
 
 function AssertNumber(value: unknown): asserts value is number {
 	if (typeIs(value, "number")) return;
@@ -856,6 +860,52 @@ export namespace Goap {
 
 		protected OnHalt(): void {
 			// Default implementation - can be overridden
+		}
+	}
+
+	export abstract class FSMConnector extends Action {
+		constructor(protected readonly fsm_: FSM.FSM) {
+			super();
+		}
+
+		protected override OnStart(world_state: WorldState): EActionStatus {
+			this.fsm_.Start();
+			return EActionStatus.RUNNING;
+		}
+		protected OnTick(
+			dt: number,
+			world_state: WorldState,
+			active_nodes: Set<Action>,
+		): EActionStatus {
+			this.fsm_.Update(dt);
+			return EActionStatus.RUNNING;
+		}
+		//OnFinish will never be called, as FSMConnector is always running
+		protected override OnHalt(): void {
+			this.fsm_.Stop();
+		}
+	}
+
+	export abstract class BTConnector extends Action {
+		constructor(protected readonly bt_: BTree.BehaviorTree) {
+			super();
+		}
+
+		protected override OnStart(world_state: WorldState): EActionStatus {
+			return EActionStatus.RUNNING;
+		}
+
+		protected override OnTick(
+			dt: number,
+			world_state: WorldState,
+			active_nodes: Set<Action>,
+		): EActionStatus {
+			this.bt_.Tick(dt);
+			return EActionStatus.RUNNING;
+		}
+
+		protected override OnHalt(): void {
+			this.bt_.Halt();
 		}
 	}
 }

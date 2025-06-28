@@ -111,6 +111,13 @@ export namespace BTree {
 				if (child.IsRunning()) child.Halt();
 			}
 		}
+
+		protected HaltOtherChildren(except_child: Node): void {
+			for (const child of this.children_) {
+				if (child === except_child) continue;
+				if (child.IsRunning()) child.Halt();
+			}
+		}
 	}
 
 	// Sequence - runs children in order until one fails
@@ -130,20 +137,11 @@ export namespace BTree {
 					this.current_index_ = i;
 					return ENodeStatus.RUNNING;
 				} else if (status === ENodeStatus.FAILURE) {
-					this.current_index_ = 0;
 					return ENodeStatus.FAILURE;
 				}
-
-				this.current_index_ = i + 1;
 			}
 
-			this.current_index_ = 0;
 			return ENodeStatus.SUCCESS;
-		}
-
-		protected override OnHalt(): void {
-			super.OnHalt();
-			this.current_index_ = 0;
 		}
 	}
 
@@ -166,16 +164,9 @@ export namespace BTree {
 			}
 			return ENodeStatus.SUCCESS;
 		}
-
-		private HaltOtherChildren(exceptChild: Node): void {
-			for (const child of this.children_) {
-				if (child === exceptChild) continue;
-				if (child.IsRunning()) child.Halt();
-			}
-		}
 	}
 
-	// Memory Sequence - remembers which child it was running
+	// Memory Sequence - remembers which child failed
 	export class MemorySequence extends Composite {
 		private current_index_ = 0;
 
@@ -185,25 +176,17 @@ export namespace BTree {
 			for (let i = this.current_index_; i < this.children_.size(); i++) {
 				const status = this.children_[i].Tick(dt, bb, active_nodes);
 
+				this.current_index_ = i;
 				if (status === ENodeStatus.RUNNING) {
-					this.current_index_ = i;
 					return ENodeStatus.RUNNING;
 				} else if (status === ENodeStatus.FAILURE) {
 					return ENodeStatus.FAILURE;
 				}
 			}
 
-			return ENodeStatus.SUCCESS;
-		}
-
-		// protected override OnHalt(): void {
-		//   super.OnHalt();
-		//   // Memory sequence keeps its index on halt
-		// }
-
-		protected override OnFinish(status: ENodeStatus, bb: Blackboard): void {
-			if (status !== ENodeStatus.SUCCESS) return;
+			// Reset index after successful run
 			this.current_index_ = 0;
+			return ENodeStatus.SUCCESS;
 		}
 	}
 
@@ -226,49 +209,37 @@ export namespace BTree {
 				} else if (status === ENodeStatus.SUCCESS) {
 					return ENodeStatus.SUCCESS;
 				}
-
-				this.current_index_ = i + 1;
 			}
 
 			return ENodeStatus.FAILURE;
-		}
-
-		protected override OnHalt(): void {
-			super.OnHalt();
-			this.current_index_ = 0;
 		}
 	}
 
-	// Memory Fallback - remembers which child it was running
-	export class MemoryFallback extends Composite {
-		private current_index_ = 0;
+	// ReactiveFallback - like Fallback but restarts from beginning when child returns RUNNING
+	export class ReactiveFallback extends Composite {
+		protected override OnStart(bb: Blackboard): ENodeStatus {
+			return ENodeStatus.RUNNING;
+		}
 
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			if (this.children_.size() === 0) return ENodeStatus.FAILURE;
-
-			for (let i = this.current_index_; i < this.children_.size(); i++) {
+			// Always start from beginning (reactive behavior)
+			for (let i = 0; i < this.children_.size(); i++) {
 				const status = this.children_[i].Tick(dt, bb, active_nodes);
 
-				if (status === ENodeStatus.RUNNING) {
-					this.current_index_ = i;
-					return ENodeStatus.RUNNING;
-				} else if (status === ENodeStatus.SUCCESS) {
-					this.current_index_ = 0;
+				if (status === ENodeStatus.SUCCESS) {
+					// Halt subsequent children
+					this.HaltOtherChildren(this.children_[i]);
 					return ENodeStatus.SUCCESS;
+				} else if (status === ENodeStatus.RUNNING) {
+					// Halt subsequent children and restart from beginning next tick
+					this.HaltOtherChildren(this.children_[i]);
+					return ENodeStatus.RUNNING;
 				}
+
+				// If FAILURE, continue to next child
 			}
 
 			return ENodeStatus.FAILURE;
-		}
-
-		// protected override  OnHalt(): void {
-		//   super.OnHalt();
-		//   // Memory fallback keeps its index on halt
-		// }
-
-		protected override OnFinish(status: ENodeStatus, bb: Blackboard): void {
-			if (status !== ENodeStatus.SUCCESS) return;
-			this.current_index_ = 0;
 		}
 	}
 
@@ -314,13 +285,6 @@ export namespace BTree {
 			}
 
 			return ENodeStatus.RUNNING;
-		}
-
-		private HaltOtherChildren(except_child: Node): void {
-			for (const child of this.children_) {
-				if (child === except_child) continue;
-				if (child.IsRunning()) child.Halt();
-			}
 		}
 	}
 
@@ -406,41 +370,6 @@ export namespace BTree {
 			}
 
 			return this.child_.Tick(dt, bb, active_nodes);
-		}
-	}
-
-	// ReactiveFallback - like Fallback but restarts from beginning when child returns RUNNING
-	export class ReactiveFallback extends Composite {
-		protected override OnStart(bb: Blackboard): ENodeStatus {
-			return ENodeStatus.RUNNING;
-		}
-
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			// Always start from beginning (reactive behavior)
-			for (let i = 0; i < this.children_.size(); i++) {
-				const status = this.children_[i].Tick(dt, bb, active_nodes);
-
-				if (status === ENodeStatus.SUCCESS) {
-					// Halt subsequent children
-					this.HaltOtherChildren(this.children_[i]);
-					return ENodeStatus.SUCCESS;
-				} else if (status === ENodeStatus.RUNNING) {
-					// Halt subsequent children and restart from beginning next tick
-					this.HaltOtherChildren(this.children_[i]);
-					return ENodeStatus.RUNNING;
-				}
-
-				// If FAILURE, continue to next child
-			}
-
-			return ENodeStatus.FAILURE;
-		}
-
-		private HaltOtherChildren(except_child: Node): void {
-			for (const child of this.children_) {
-				if (child === except_child) continue;
-				if (child.IsRunning()) child.Halt();
-			}
 		}
 	}
 
@@ -553,11 +482,6 @@ export namespace BTree {
 
 			return ENodeStatus.FAILURE;
 		}
-
-		protected override OnHalt(): void {
-			super.OnHalt();
-			this.current_child_ = -1;
-		}
 	}
 
 	// RepeatUntilSuccess - retries child until it succeeds with max attempts
@@ -635,7 +559,7 @@ export namespace BTree {
 
 	// Condition node - checks a condition
 	export class Condition extends Node {
-		constructor(private readonly condition_: (bb: Blackboard) => boolean) {
+		constructor(private readonly condition_: (bb: Blackboard) => boolean | boolean) {
 			super();
 		}
 
@@ -800,6 +724,7 @@ export namespace BTree {
 		}
 	}
 
+	// Timer - checks if a timer has expired
 	export class Timer extends Node {
 		constructor(private readonly key_name_: string) {
 			super();
@@ -838,9 +763,6 @@ export namespace BTree {
 		protected override OnTick(dt: number): ENodeStatus {
 			this.fsm_.Update(dt);
 			return ENodeStatus.RUNNING;
-		}
-		protected override OnFinish(status: ENodeStatus, bb: Blackboard): void {
-			this.fsm_.Stop();
 		}
 		protected override OnHalt(): void {
 			this.fsm_.Stop();

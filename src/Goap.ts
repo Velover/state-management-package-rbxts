@@ -3,7 +3,6 @@
 import { FSM } from "FSM";
 import { Blackboard } from "./Blackboard";
 import { BTree } from "BehaviorTree";
-import { HttpService } from "@rbxts/services";
 
 function AssertNumber(value: unknown): asserts value is number {
 	if (typeIs(value, "number")) return;
@@ -38,14 +37,9 @@ export namespace Goap {
 		}
 
 		// Clone method for planning
-		Clone(): WorldState {
-			const cloned = new WorldState({}, {});
-
-			// Access the protected data_ property properly
-			for (const [key, value] of this.data_) {
-				cloned.SetWild(key, this.DeepClone(value));
-			}
-			return cloned;
+		Clone(): WorldState<T> {
+			const obj = { data_: table.clone(this.data_) };
+			return setmetatable(obj, WorldState as never) as never;
 		}
 
 		override Cast<T extends Record<string, unknown>>(): WorldState<T> {
@@ -54,22 +48,6 @@ export namespace Goap {
 
 		public Size(): number {
 			return this.data_.size();
-		}
-
-		public GenerateKey(): string {
-			const keys = new Array(this.data_.size(), "");
-			let i = 0;
-			for (const [k] of this.data_) {
-				keys[i++] = k;
-			}
-			keys.sort();
-
-			const obj: Record<string, unknown> = {};
-			for (const key of keys) {
-				obj[key] = this.data_.get(key);
-			}
-
-			return HttpService.JSONEncode(obj);
 		}
 
 		// Enhanced distance calculation with weights
@@ -93,42 +71,20 @@ export namespace Goap {
 
 			return true;
 		}
-
-		private DeepClone(obj: unknown): unknown {
-			if (typeOf(obj) !== "table") return obj;
-
-			const cloned: Record<string, unknown> = {};
-			for (const [k, v] of obj as unknown as Map<string, unknown>) {
-				cloned[k] = this.DeepClone(v);
-			}
-			return cloned;
-		}
 	}
 
 	export class WorldStateSet {
-		private readonly MAX_KEYS_SIZE_FOR_STRINGFICATION = 10;
 		private states_: WorldState[] = [];
 		private states_set_ = new Set<string>();
 		Add(state: WorldState): void {
-			if (state.Size() < this.MAX_KEYS_SIZE_FOR_STRINGFICATION) {
-				this.states_set_.add(state.GenerateKey());
-				return;
-			}
-
 			if (!this.Has(state)) this.states_.push(state);
 		}
 
 		Has(state: WorldState): boolean {
-			if (state.Size() < this.MAX_KEYS_SIZE_FOR_STRINGFICATION) {
-				return this.states_set_.has(state.GenerateKey());
-			}
 			return this.states_.some((s) => s.Equals(state));
 		}
 
 		Delete(state: WorldState): boolean {
-			if (state.Size() < this.MAX_KEYS_SIZE_FOR_STRINGFICATION) {
-				return this.states_set_.delete(state.GenerateKey());
-			}
 			const index = this.states_.findIndex((s) => s.Equals(state));
 			if (index !== -1) {
 				this.states_.remove(index);
@@ -749,7 +705,7 @@ export namespace Goap {
 				if (!typeIs(other_v, "table")) {
 					throw "Insert effect can only be applied to arrays, but got: " + typeOf(other_v);
 				}
-				(other_v as defined[]).push(v);
+				(other_v as defined[]).push(v!);
 				return other_v as unknown[];
 			},
 		Remove:
@@ -757,7 +713,7 @@ export namespace Goap {
 			(other_v: unknown) => {
 				if (!typeIs(other_v, "table"))
 					throw "Remove effect can only be applied to arrays, but got: " + typeOf(other_v);
-				(other_v as defined[]).remove((other_v as defined[]).indexOf(value));
+				(other_v as defined[]).remove((other_v as defined[]).indexOf(value!));
 				return other_v as unknown[];
 			},
 		Multiply:
@@ -781,9 +737,9 @@ export namespace Goap {
 				return value;
 			},
 		Toggle: (): Effect => (other_v: unknown) => {
-			if (typeOf(other_v) === "boolean") {
+			if (typeIs(other_v, "boolean")) {
 				return !other_v;
-			} else if (typeOf(other_v) === "number") {
+			} else if (typeIs(other_v, "number")) {
 				return other_v === 0 ? 1 : 0;
 			}
 			throw "Toggle effect can only be applied to boolean or number types.";

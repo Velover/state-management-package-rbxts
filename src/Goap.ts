@@ -18,6 +18,7 @@ export namespace Goap {
 	export type Effect = (other_v: unknown) => unknown;
 	export type Requirement = (other_v: unknown) => boolean;
 
+	/**Prefer flat wild and typed data */
 	// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 	export class WorldState<T extends Record<string, unknown> = {}> extends Blackboard<T> {
 		SatisfiesRequirements(requirements: Map<string, Requirement>): boolean {

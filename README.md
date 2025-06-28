@@ -12,7 +12,10 @@ A comprehensive state management library for [roblox-ts](https://roblox-ts.com/)
 - **Modular Design**: Use FSMs, BTs, GOAP, and Blackboards independently or together.
 - **Type-Safe**: Leverages TypeScript for robust and maintainable code.
 - **Extensible**: Easily create custom states, nodes, actions, and goals.
-- **Connectors**: Seamlessly integrate FSMs with Behavior Trees or GOAP agents, and Behavior Trees with FSMs or GOAP agents.
+- **Connectors**: Seamlessly integrate FSMs with Behavior Trees or GOAP agents, and vice versa.
+- **Performance Optimized**: Native compilation support with optimize pragmas.
+- **Enhanced GOAP**: Hierarchical goals, weighted requirements, and composite goal support.
+- **Rich Behavior Tree Nodes**: Extended set of composite, decorator, and utility nodes.
 
 ## Installation
 
@@ -56,15 +59,13 @@ blackboard.Set("target", game.Workspace.FindFirstChild("Enemy"));
 const currentHealth = blackboard.Get("health");
 print(currentHealth); // 90
 
-const target = blackboard.Get("target");
-if (target) {
-	print(`Target is ${target.Name}`);
-}
-
 // Use wild keys for dynamic data
 blackboard.SetWild("lastKnownPosition", new Vector3(10, 0, 5));
 const pos = blackboard.GetWild<Vector3>("lastKnownPosition");
-print(pos);
+
+// Update values with callbacks
+const newHealth = blackboard.UpdateWild<number>("health", (current) => (current ?? 100) - 10);
+print(newHealth); // 80
 ```
 
 ### Finite State Machine (FSM)
@@ -106,84 +107,102 @@ fsm.RegisterState("Idle", new IdleState());
 fsm.RegisterState("Patrol", new PatrolState());
 
 // Add transitions
-fsm.AddTransition("Idle", "Patrol", 1, () => {
-	// Condition to transition from Idle to Patrol
-	return blackboard.Get("enemySpotted") === true;
+fsm.AddTransition("Idle", "Patrol", 1, (bb) => {
+	return bb.Get("enemySpotted") === true;
 });
 
-fsm.AddTransition("Patrol", "Idle", 1, () => {
-	// Condition to transition from Patrol to Idle
-	return blackboard.Get("enemySpotted") === false;
+fsm.AddTransition("Patrol", "Idle", 1, (bb) => {
+	return bb.Get("enemySpotted") === false;
 });
 
 fsm.Start();
 
 // In your game loop
 game.GetService("RunService").Heartbeat.Connect((dt) => {
-	// Example: Spot an enemy
-	// blackboard.Set("enemySpotted", true);
 	fsm.Update(dt);
 });
 ```
 
 ### Behavior Tree (BT)
 
-Behavior Trees allow for creating complex, hierarchical behaviors.
+Behavior Trees allow for creating complex, hierarchical behaviors with enhanced node types.
 
 ```typescript
 import { BTree, Blackboard } from "@rbxts/state-management";
 
-const blackboard = new Blackboard({ hasTarget: false, energyLevel: 100 });
+const blackboard = new Blackboard({
+	hasTarget: false,
+	energyLevel: 100,
+	cooldownTimer: 0,
+});
 
-// Create a simple behavior tree
+// Create a behavior tree with enhanced nodes
 const root = new BTree.Sequence()
 	.AddChild(new BTree.Condition((bb) => bb.Get("hasTarget") === true))
 	.AddChild(
-		new BTree.Action((bb) => {
-			print("Attacking target!");
-			bb.Set("energyLevel", bb.Get("energyLevel") - 10);
-			return BTree.ENodeStatus.SUCCESS;
-		}),
+		new BTree.Cooldown(
+			new BTree.Action((bb) => {
+				print("Attacking target!");
+				bb.Set("energyLevel", bb.Get("energyLevel") - 10);
+				return BTree.ENodeStatus.SUCCESS;
+			}),
+			2.0, // 2 second cooldown
+		),
 	);
+
+// Enhanced parallel execution
+const patrolBehavior = new BTree.Parallel(
+	BTree.EParallelPolicy.ONE, // Success policy: one child succeeds
+	BTree.EParallelPolicy.ONE, // Failure policy: one child fails
+)
+	.AddChild(
+		new BTree.Action((bb) => {
+			// Patrol movement logic
+			return BTree.ENodeStatus.RUNNING;
+		}),
+	)
+	.AddChild(new BTree.Condition((bb) => bb.Get("hasTarget") === true));
 
 const behaviorTree = new BTree.BehaviorTree(root, blackboard);
 
 // In your game loop
 game.GetService("RunService").Heartbeat.Connect((dt) => {
-	// Example: Aquire a target
-	// blackboard.Set("hasTarget", true);
 	behaviorTree.Tick(dt);
 });
 ```
 
 ### Goal Oriented Action Planning (GOAP)
 
-GOAP allows agents to create plans to achieve goals based on the current world state and available actions.
+Enhanced GOAP with hierarchical goals, weighted requirements, and improved planning.
 
 ```typescript
 import { Goap, Blackboard } from "@rbxts/state-management";
 
-// Define a world state
-const worldState = new Goap.WorldState(
-	{},
-	{
-		hasWeapon: false,
-		enemyVisible: false,
-		isSafe: true,
-	},
-);
+// Define a world state with typed support
+interface WorldData {
+	hasWeapon: boolean;
+	enemyVisible: boolean;
+	isSafe: boolean;
+}
 
-// Define actions
+const worldState = new Goap.WorldState<WorldData>({
+	hasWeapon: false,
+	enemyVisible: false,
+	isSafe: true,
+});
+
+// Define actions with enhanced features
 class PickupWeaponAction extends Goap.Action {
 	GetStaticEffects() {
 		return new Map<string, Goap.Effect>().set("hasWeapon", Goap.Effect.Set(true));
 	}
 	GetStaticRequirements() {
-		return new Map<string, Goap.Requirement>(); // No specific requirements to pick up
+		return new Map<string, Goap.Requirement>().set("isSafe", Goap.Comparison.Is()); // Only pick up when safe
 	}
 	GetCost() {
 		return 1;
 	}
+
 	protected OnTick() {
 		print("Picking up weapon...");
 		// Simulate time to pick up
@@ -193,8 +212,9 @@ class PickupWeaponAction extends Goap.Action {
 
 class AttackEnemyAction extends Goap.Action {
 	GetStaticEffects() {
-		// Example: could set enemyHealth, or enemyIsDead
-		return new Map<string, Goap.Effect>().set("enemyVisible", Goap.Effect.Set(false));
+		return new Map<string, Goap.Effect>()
+			.set("enemyVisible", Goap.Effect.Set(false))
+			.set("isSafe", Goap.Effect.Set(true));
 	}
 	GetStaticRequirements() {
 		return new Map<string, Goap.Requirement>()
@@ -204,63 +224,88 @@ class AttackEnemyAction extends Goap.Action {
 	GetCost() {
 		return 2;
 	}
+
 	protected OnTick() {
 		print("Attacking enemy...");
 		return Goap.EActionStatus.SUCCESS;
 	}
 }
 
-// Define goals
-const killEnemyGoal = new Goap.Goal("KillEnemy", 10).AddRequirement(
-	"enemyVisible",
-	Goap.Comparison.IsNot(),
-); // Goal is to make enemy not visible (defeated)
+// Enhanced goals with weighted requirements and dynamic priorities
+const combatGoal = new Goap.Goal("Combat", (worldState, agent) => {
+	// Dynamic priority based on world state
+	const enemyVisible = worldState.GetWild<boolean>("enemyVisible");
+	return enemyVisible ? 20 : 5;
+})
+	.AddRequirement("enemyVisible", Goap.Comparison.IsNot(), 3) // Weight: 3
+	.AddRequirement("isSafe", Goap.Comparison.Is(), 1); // Weight: 1
 
-// Create agent
+// Hierarchical goal support
+const survivalGoal = new Goap.Goal("Survival", 15, true) // Composite goal
+	.AddSubGoal(new Goap.Goal("GetWeapon", 10).AddRequirement("hasWeapon", Goap.Comparison.Is()))
+	.AddSubGoal(combatGoal);
+
+// Create agent with enhanced features
 const agent = new Goap.Agent(
 	worldState,
 	[new PickupWeaponAction(), new AttackEnemyAction()],
-	[killEnemyGoal],
+	[survivalGoal, combatGoal],
 );
 
-// Simulate world changes and update agent
-// worldState.SetWild("enemyVisible", true); // Enemy appears
+// Enhanced effects with clamping and default values
+worldState.SetWild("playerHealth", 100);
+const healthEffect = Goap.Effect.DecrementClamp(10, 0, 100);
+const newHealth = healthEffect(worldState.GetWild("playerHealth"));
 
 game.GetService("RunService").Heartbeat.Connect((dt) => {
+	// Simulate world changes
+	if (math.random() < 0.01) {
+		worldState.SetWild("enemyVisible", true);
+	}
+
 	agent.Update(dt);
-	// worldState changes can happen here, e.g., enemy becomes visible
-	// worldState.SetWild("enemyVisible", true);
 });
 ```
 
+## Enhanced Features
+
+### Behavior Tree Enhancements
+
+- **Timer Node**: `Timer` - Manages countdown timers stored in blackboard.
+- **Enhanced Parallel**: Uses `EParallelPolicy` enum for clearer success/failure policies.
+- **Improved Cooldown**: `Cooldown` decorator with configurable reset behavior.
+- **Memory Sequences**: Better state management for interrupted sequences.
+
+### GOAP Enhancements
+
+- **Typed WorldState**: Generic support for typed world state data.
+- **Weighted Requirements**: Goals can have weighted requirements for better planning.
+- **Hierarchical Goals**: Composite goals that decompose into sub-goals.
+- **Dynamic Priorities**: Goal priorities can be functions of world state and agent.
+- **Enhanced Effects**: New effects like `IncrementClamp`, `DecrementClamp` with bounds.
+- **Performance Optimization**: Improved planning algorithms and state management.
+
+### Cross-System Integration
+
+- **FSMConnector**: Use FSMs within GOAP actions or Behavior Tree nodes.
+- **BTConnector**: Embed Behavior Trees in GOAP actions.
+- **GoapConnector**: Run GOAP agents as Behavior Tree nodes or FSM states.
+
 ## Modules
 
-- **`Blackboard`**: A flexible data store.
-- **`FSM`**:
-  - `FSM`: The main state machine class.
-  - `IFSMState`: Interface for states.
-  - `BehaviorTreeConnector`: An FSM state that runs a Behavior Tree.
-  - `GOAPConnector`: An FSM state that runs a GOAP Agent.
-- **`BTree`**:
-  - `Node`, `Composite`, `Decorator`: Base classes for tree nodes.
-  - `Sequence`, `ReactiveSequence`, `MemorySequence`: Execute children sequentially.
-  - `Fallback`, `MemoryFallback`, `ReactiveFallback`: Execute children until one succeeds.
-  - `Parallel`: Execute children concurrently.
-  - `Inverter`, `ForceSuccess`, `ForceFailure`, `Timeout`, `RetryUntilSuccess`, `RetryUntilFailure`, `Repeat`, `Cooldown`: Decorator nodes.
-  - `Action`, `Condition`: Leaf nodes for performing actions and checking conditions.
-  - `IfThenElse`, `WhileDoElse`, `Switch`: Control flow nodes.
-  - `Wait`: Pauses execution.
-  - `SubTree`: Embed another Behavior Tree.
-  - `FSMConnector`: A Behavior Tree node that runs an FSM.
-  - `GoapConnector`: A Behavior Tree node that runs a GOAP Agent.
-  - `BehaviorTree`: The main Behavior Tree runner.
-- **`Goap`**:
-  - `WorldState`: Represents the state of the world.
-  - `Goal`: Defines what an agent wants to achieve.
-  - `Action`: Defines an operation an agent can perform.
-  - `Planner`: Creates plans (sequences of actions) to achieve goals.
-  - `Agent`: Manages goals, actions, and executes plans.
-  - `Comparison`, `Effect`: Utility functions for defining requirements and effects.
+- **`Blackboard`**: Enhanced data store with update callbacks and type safety.
+- **`FSM`**: Complete finite state machine with priority-based transitions.
+- **`BTree`**: Comprehensive behavior tree implementation with 20+ node types.
+- **`Goap`**: Advanced goal-oriented action planning with hierarchical goals.
+
+## Performance
+
+This library is optimized for Roblox with:
+
+- Native compilation hints (`//native`, `//optimize 2`)
+- Efficient data structures and algorithms
+- Minimal garbage collection impact
+- Optimized A\* pathfinding for GOAP planning
 
 ## Contributing
 

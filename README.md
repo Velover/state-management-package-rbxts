@@ -81,7 +81,7 @@ class IdleState implements FSM.IFSMState {
 		print("Entering Idle State");
 	}
 	Update(dt: number, bb: Blackboard) {
-		/* Idle logic */
+		// Idle logic
 	}
 	OnExit(bb: Blackboard) {
 		print("Exiting Idle State");
@@ -93,10 +93,29 @@ class PatrolState implements FSM.IFSMState {
 		print("Entering Patrol State");
 	}
 	Update(dt: number, bb: Blackboard) {
-		/* Patrol logic */
+		// Patrol logic - move between waypoints
+		const currentWaypoint = bb.GetWild<number>("currentWaypoint") ?? 0;
+		// ... patrol movement logic
 	}
 	OnExit(bb: Blackboard) {
 		print("Exiting Patrol State");
+	}
+}
+
+class AlertState implements FSM.IFSMState {
+	OnEnter(bb: Blackboard) {
+		print("Entering Alert State");
+		bb.SetWild("alertTime", 5.0); // Alert for 5 seconds
+	}
+	Update(dt: number, bb: Blackboard) {
+		const alertTime = bb.UpdateWild<number>("alertTime", (current) => (current ?? 0) - dt);
+		if (alertTime <= 0) {
+			bb.SetWild("alertFinished", true);
+		}
+	}
+	OnExit(bb: Blackboard) {
+		print("Exiting Alert State");
+		bb.SetWild("alertFinished", false);
 	}
 }
 
@@ -105,23 +124,81 @@ const fsm = new FSM.FSM("Idle", blackboard);
 
 fsm.RegisterState("Idle", new IdleState());
 fsm.RegisterState("Patrol", new PatrolState());
+fsm.RegisterState("Alert", new AlertState());
 
-// Add transitions
+// Regular condition-based transitions (checked every frame)
 fsm.AddTransition("Idle", "Patrol", 1, (bb) => {
-	return bb.Get("enemySpotted") === true;
+	return bb.GetWild<boolean>("enemySpotted") === false;
 });
 
-fsm.AddTransition("Patrol", "Idle", 1, (bb) => {
-	return bb.Get("enemySpotted") === false;
+fsm.AddTransition("Alert", "Idle", 1, (bb) => {
+	return bb.GetWild<boolean>("alertFinished") === true;
 });
 
+// Event-based transitions (triggered by specific events)
+fsm.AddEventTransition("Idle", "Alert", "enemySighted", 1);
+fsm.AddEventTransition("Patrol", "Alert", "enemySighted", 1);
+
+// Any-state transitions (can trigger from any state)
+fsm.AddAnyTransition("Alert", 2, (bb) => {
+	return bb.GetWild<boolean>("emergencyAlert") === true;
+});
+
+// Start the FSM
 fsm.Start();
 
 // In your game loop
 game.GetService("RunService").Heartbeat.Connect((dt) => {
 	fsm.Update(dt);
 });
+
+// Trigger events when specific conditions are met
+game.GetService("UserInputService").InputBegan.Connect((input) => {
+	if (input.KeyCode === Enum.KeyCode.E) {
+		// Simulate enemy sighting
+		fsm.HandleEvent("enemySighted");
+	}
+});
 ```
+
+#### FSM Transition Types
+
+The FSM supports three types of transitions:
+
+1. **Condition Transitions**: Checked every frame during Update()
+
+   ```typescript
+   fsm.AddTransition("FromState", "ToState", priority, (bb) => {
+   	return bb.Get("someCondition") === true;
+   });
+   ```
+
+2. **Event Transitions**: Triggered by specific events
+
+   ```typescript
+   fsm.AddEventTransition("FromState", "ToState", "eventName", priority, (bb) => {
+   	// Optional condition - if omitted, event always triggers transition
+   	return bb.Get("canTransition") === true;
+   });
+
+   // Later, trigger the event
+   fsm.HandleEvent("eventName");
+   ```
+
+3. **Any-State Transitions**: Can trigger from any current state
+   ```typescript
+   fsm.AddAnyTransition("ToState", priority, (bb) => {
+   	return bb.Get("globalCondition") === true;
+   });
+   ```
+
+#### FSM Features
+
+- **Priority-based transitions**: Higher priority transitions are checked first
+- **Event-driven state changes**: Use `HandleEvent()` for immediate state changes
+- **Conditional transitions**: All transition types support optional conditions
+- **Blackboard integration**: Share data between states using the blackboard
+- **State lifecycle**: `OnEnter()`, `Update()`, and `OnExit()` methods for each state
 
 ### Behavior Tree (BT)
 
@@ -137,8 +214,8 @@ const blackboard = new Blackboard({
 });
 
 // Create a behavior tree with enhanced nodes
-const root = new BTree.Sequence()
-	.AddChild(new BTree.Condition((bb) => bb.Get("hasTarget") === true))
+const attackSequence = new BTree.Sequence()
+	.AddChild(new BTree.Condition((bb) => bb.GetWild<boolean>("hasTarget") === true))
 	.AddChild(
 		new BTree.Cooldown(
 			new BTree.Action((bb) => {
@@ -158,12 +235,16 @@ const patrolBehavior = new BTree.Parallel(
 	.AddChild(
 		new BTree.Action((bb) => {
 			// Patrol movement logic
+			print("Patrolling...");
 			return BTree.ENodeStatus.RUNNING;
 		}),
 	)
-	.AddChild(new BTree.Condition((bb) => bb.Get("hasTarget") === true));
+	.AddChild(new BTree.Condition((bb) => bb.GetWild<boolean>("hasTarget") === true));
 
-const behaviorTree = new BTree.BehaviorTree(root, blackboard);
+// Main behavior tree with fallback between attack and patrol
+const mainBehavior = new BTree.Fallback().AddChild(attackSequence).AddChild(patrolBehavior);
+
+const behaviorTree = new BTree.BehaviorTree(mainBehavior, blackboard);
 
 // In your game loop
 game.GetService("RunService").Heartbeat.Connect((dt) => {
@@ -194,11 +275,15 @@ const worldState = new Goap.WorldState<WorldData>({
 // Define actions with enhanced features
 class PickupWeaponAction extends Goap.Action {
 	GetStaticEffects() {
-		return new Map<string, Goap.Effect>().set("hasWeapon", Goap.Effect.Set(true));
+		return new Map<string, Goap.Effect>([["hasWeapon", Goap.Effect.Set(true)]]);
 	}
+
 	GetStaticRequirements() {
-		return new Map<string, Goap.Requirement>().set("isSafe", Goap.Comparison.Is()); // Only pick up when safe
+		return new Map<string, Goap.Requirement>([
+			["isSafe", Goap.Comparison.Is()], // Only pick up when safe
+		]);
 	}
+
 	GetCost() {
 		return 1;
 	}
@@ -268,6 +353,14 @@ game.GetService("RunService").Heartbeat.Connect((dt) => {
 ```
 
 ## Enhanced Features
+
+### FSM Enhancements
+
+- **Event Transitions**: Trigger state changes with specific events using `AddEventTransition()` and `HandleEvent()`
+- **Any-State Transitions**: Global transitions that can trigger from any state
+- **Priority System**: Higher priority transitions are evaluated first
+- **Conditional Events**: Event transitions can include optional conditions
+- **State Lifecycle**: Complete OnEnter/Update/OnExit lifecycle for all states
 
 ### Behavior Tree Enhancements
 

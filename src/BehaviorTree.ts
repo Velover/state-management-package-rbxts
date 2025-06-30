@@ -301,10 +301,6 @@ export namespace BTree {
 
 	// Inverter - inverts SUCCESS/FAILURE results
 	export class Inverter extends Decorator {
-		constructor(child: Node) {
-			super(child);
-		}
-
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
 			const status = this.child_.Tick(dt, bb, active_nodes);
 
@@ -317,10 +313,6 @@ export namespace BTree {
 
 	// ForceSuccess - always returns SUCCESS unless child is RUNNING
 	export class ForceSuccess extends Decorator {
-		constructor(child: Node) {
-			super(child);
-		}
-
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
 			const status = this.child_.Tick(dt, bb, active_nodes);
 
@@ -332,10 +324,6 @@ export namespace BTree {
 
 	// ForceFailure - always returns FAILURE unless child is RUNNING
 	export class ForceFailure extends Decorator {
-		constructor(child: Node) {
-			super(child);
-		}
-
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
 			const status = this.child_.Tick(dt, bb, active_nodes);
 
@@ -725,14 +713,15 @@ export namespace BTree {
 	}
 
 	// Timer - checks if a timer has expired
-	export class Timer extends Node {
-		constructor(private readonly key_name_: string) {
+	// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+	export class Timer<T extends Record<string, unknown> = {}> extends Node {
+		constructor(private readonly key_name_: keyof T) {
 			super();
 		}
 
 		protected override OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			if (!bb.HasWild(this.key_name_)) return ENodeStatus.FAILURE;
-			const time_left = bb.UpdateWild<number>(this.key_name_, (v) => v! - dt);
+			if (!bb.HasWild(this.key_name_ as string)) return ENodeStatus.FAILURE;
+			const time_left = bb.UpdateWild<number>(this.key_name_ as string, (v) => v! - dt);
 			return time_left <= 0 ? ENodeStatus.SUCCESS : ENodeStatus.FAILURE;
 		}
 	}

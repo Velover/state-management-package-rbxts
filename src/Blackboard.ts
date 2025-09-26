@@ -37,6 +37,16 @@ export class Blackboard<TRecord extends object = object> {
 		return this.data_.get(key as never) as TRecord[T];
 	}
 
+	public Update<T extends keyof TRecord>(
+		key: T,
+		callback: (v: TRecord[T]) => TRecord[T],
+	): TRecord[T] {
+		const current_value = this.data_.get(key as never);
+		const new_value = callback(current_value as never);
+		this.data_.set(key as never, new_value);
+		return new_value;
+	}
+
 	public GetWild<T>(key: string): T | undefined {
 		return this.data_.get(key) as T | undefined;
 	}

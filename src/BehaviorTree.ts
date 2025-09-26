@@ -74,10 +74,10 @@ export namespace BTree {
 			return ENodeStatus.FAILURE;
 		}
 
-		public Halt(): void {
+		public Halt(bb: Blackboard): void {
 			if (this.state_ !== ENodeState.RUNNING) return;
 			this.state_ = ENodeState.HALTED;
-			this.OnHalt();
+			this.OnHalt(bb);
 			this.state_ = ENodeState.IDLE;
 		}
 
@@ -97,7 +97,7 @@ export namespace BTree {
 		}
 
 		/** Default implementation - can be overridden*/
-		protected OnHalt(): void {}
+		protected OnHalt(bb: Blackboard): void {}
 	}
 
 	// Composite nodes (can have multiple children)
@@ -116,17 +116,17 @@ export namespace BTree {
 			return this;
 		}
 
-		protected override OnHalt(): void {
+		protected override OnHalt(bb: Blackboard): void {
 			// Halt all running children
 			for (const child of this.children_) {
-				if (child.IsRunning()) child.Halt();
+				if (child.IsRunning()) child.Halt(bb);
 			}
 		}
 
-		protected HaltOtherChildren(except_child: Node): void {
+		protected HaltOtherChildren(except_child: Node, bb: Blackboard): void {
 			for (const child of this.children_) {
 				if (child === except_child) continue;
-				if (child.IsRunning()) child.Halt();
+				if (child.IsRunning()) child.Halt(bb);
 			}
 		}
 	}
@@ -167,7 +167,7 @@ export namespace BTree {
 				const status = this.children_[i].Tick(dt, bb, active_nodes);
 
 				if (status === ENodeStatus.RUNNING) {
-					this.HaltOtherChildren(this.children_[i]);
+					this.HaltOtherChildren(this.children_[i], bb);
 					return ENodeStatus.RUNNING;
 				} else if (status === ENodeStatus.FAILURE) {
 					return ENodeStatus.FAILURE;
@@ -239,11 +239,11 @@ export namespace BTree {
 
 				if (status === ENodeStatus.SUCCESS) {
 					// Halt subsequent children
-					this.HaltOtherChildren(this.children_[i]);
+					this.HaltOtherChildren(this.children_[i], bb);
 					return ENodeStatus.SUCCESS;
 				} else if (status === ENodeStatus.RUNNING) {
 					// Halt subsequent children and restart from beginning next tick
-					this.HaltOtherChildren(this.children_[i]);
+					this.HaltOtherChildren(this.children_[i], bb);
 					return ENodeStatus.RUNNING;
 				}
 
@@ -274,14 +274,14 @@ export namespace BTree {
 					success_count++;
 					if (this.success_policy_ === EParallelPolicy.ONE) {
 						// Halt other children
-						this.HaltOtherChildren(child);
+						this.HaltOtherChildren(child, bb);
 						return ENodeStatus.SUCCESS;
 					}
 				} else if (status === ENodeStatus.FAILURE) {
 					failure_count++;
 					if (this.failure_policy_ === EParallelPolicy.ONE) {
 						// Halt other children
-						this.HaltOtherChildren(child);
+						this.HaltOtherChildren(child, bb);
 						return ENodeStatus.FAILURE;
 					}
 				}
@@ -305,8 +305,8 @@ export namespace BTree {
 			super();
 		}
 
-		protected override OnHalt(): void {
-			if (this.child_.IsRunning()) this.child_.Halt();
+		protected override OnHalt(bb: Blackboard): void {
+			if (this.child_.IsRunning()) this.child_.Halt(bb);
 		}
 	}
 
@@ -373,7 +373,7 @@ export namespace BTree {
 			this.time_left_ -= dt;
 
 			if (this.time_left_ <= 0) {
-				this.child_.Halt();
+				this.child_.Halt(bb);
 				return this.behavior_ === ETimeoutBehavior.FAILURE
 					? ENodeStatus.FAILURE
 					: ENodeStatus.SUCCESS;
@@ -429,8 +429,8 @@ export namespace BTree {
 			return ENodeStatus.FAILURE;
 		}
 
-		protected override OnHalt(): void {
-			super.OnHalt();
+		protected override OnHalt(bb: Blackboard): void {
+			super.OnHalt(bb);
 			this.current_child_ = -1;
 		}
 	}
@@ -461,7 +461,7 @@ export namespace BTree {
 				// If condition changed, halt current child and switch
 				const expected_child = condition_status === ENodeStatus.SUCCESS ? 1 : 2;
 				if (this.current_child_ !== expected_child) {
-					this.children_[this.current_child_].Halt();
+					this.children_[this.current_child_].Halt(bb);
 					this.current_child_ = expected_child;
 				}
 
@@ -623,9 +623,9 @@ export namespace BTree {
 			return ENodeStatus.FAILURE;
 		}
 
-		protected override OnHalt(): void {
+		protected override OnHalt(bb: Blackboard): void {
 			if (this.active_node_?.IsRunning()) {
-				this.active_node_.Halt();
+				this.active_node_.Halt(bb);
 			}
 			this.active_node_ = undefined;
 		}
@@ -680,8 +680,8 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected override OnHalt(): void {
-			super.OnHalt();
+		protected override OnHalt(bb: Blackboard): void {
+			super.OnHalt(bb);
 			this.current_count_ = 0;
 		}
 
@@ -734,8 +734,8 @@ export namespace BTree {
 			return status;
 		}
 
-		protected override OnHalt(): void {
-			super.OnHalt();
+		protected override OnHalt(bb: Blackboard): void {
+			super.OnHalt(bb);
 			if (!this.reset_on_halt_) return;
 			this.time_left_ = this.cooldown_s_;
 		}
@@ -825,7 +825,7 @@ export namespace BTree {
 			// Halt nodes that were active but are no longer traversed
 			for (const node of this.active_nodes_) {
 				if (!new_active_nodes.has(node)) {
-					node.Halt();
+					node.Halt(this.blackboard_);
 				}
 			}
 
@@ -834,7 +834,7 @@ export namespace BTree {
 		}
 
 		public Halt(): void {
-			this.root_.Halt();
+			this.root_.Halt(this.blackboard_);
 			this.active_nodes_.clear();
 		}
 

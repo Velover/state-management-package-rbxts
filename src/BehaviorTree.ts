@@ -19,8 +19,19 @@ export namespace BTree {
 	}
 
 	export const enum EParallelPolicy {
-		ONE,
-		ALL,
+		ONE = "ONE",
+		ALL = "ALL",
+	}
+
+	export const enum ERepeatCondition {
+		ALWAYS = "ALWAYS",
+		SUCCESS = "SUCCESS",
+		FAILURE = "FAILURE",
+	}
+
+	export const enum ETimeoutBehavior {
+		FAILURE = "FAILURE",
+		SUCCESS = "SUCCESS",
 	}
 
 	// Base node class
@@ -333,6 +344,14 @@ export namespace BTree {
 		}
 	}
 
+	// FireAndForget - executes child and ignores its result
+	export class FireAndForget extends Decorator {
+		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+			this.child_.Tick(dt, bb, active_nodes);
+			return ENodeStatus.SUCCESS;
+		}
+	}
+
 	// Timeout - fails child if it takes longer than specified time
 	export class Timeout extends Decorator {
 		private time_left_: number = 0;
@@ -340,6 +359,7 @@ export namespace BTree {
 		constructor(
 			child: Node,
 			private readonly timeout_s_: number,
+			private behavior_: ETimeoutBehavior = ETimeoutBehavior.FAILURE,
 		) {
 			super(child);
 		}
@@ -354,7 +374,9 @@ export namespace BTree {
 
 			if (this.time_left_ <= 0) {
 				this.child_.Halt();
-				return ENodeStatus.FAILURE;
+				return this.behavior_ === ETimeoutBehavior.FAILURE
+					? ENodeStatus.FAILURE
+					: ENodeStatus.SUCCESS;
 			}
 
 			return this.child_.Tick(dt, bb, active_nodes);
@@ -536,23 +558,25 @@ export namespace BTree {
 
 	// Action node - performs an action
 	export class Action extends Node {
-		constructor(private readonly action_: (bb: Blackboard) => ENodeStatus) {
+		constructor(private readonly action_: (bb: Blackboard, dt: number) => ENodeStatus) {
 			super();
 		}
 
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			return this.action_(bb);
+			return this.action_(bb, dt);
 		}
 	}
 
 	// Condition node - checks a condition
 	export class Condition extends Node {
-		constructor(private readonly condition_: (bb: Blackboard) => boolean | boolean) {
+		constructor(
+			private readonly condition_: (bb: Blackboard, dt: number) => Promise<boolean> | boolean,
+		) {
 			super();
 		}
 
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			return this.condition_(bb) ? ENodeStatus.SUCCESS : ENodeStatus.FAILURE;
+			return this.condition_(bb, dt) ? ENodeStatus.SUCCESS : ENodeStatus.FAILURE;
 		}
 	}
 
@@ -617,7 +641,8 @@ export namespace BTree {
 
 		constructor(
 			child: Node,
-			private count_: number,
+			private repeat_count_: number,
+			private condition_: ERepeatCondition = ERepeatCondition.ALWAYS,
 		) {
 			super(child);
 		}
@@ -628,7 +653,7 @@ export namespace BTree {
 		}
 
 		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			if (this.current_count_ >= this.count_) {
+			if (this.current_count_ >= this.repeat_count_) {
 				return ENodeStatus.SUCCESS;
 			}
 
@@ -638,9 +663,17 @@ export namespace BTree {
 				return ENodeStatus.RUNNING;
 			}
 
+			if (this.condition_ === ERepeatCondition.SUCCESS && status !== ENodeStatus.SUCCESS) {
+				return ENodeStatus.SUCCESS;
+			}
+
+			if (this.condition_ === ERepeatCondition.FAILURE && status !== ENodeStatus.FAILURE) {
+				return ENodeStatus.SUCCESS;
+			}
+
 			this.current_count_++;
 
-			if (this.current_count_ >= this.count_) {
+			if (this.current_count_ >= this.repeat_count_) {
 				return ENodeStatus.SUCCESS;
 			}
 
@@ -713,8 +746,7 @@ export namespace BTree {
 	}
 
 	// Timer - checks if a timer has expired
-	// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-	export class Timer<T extends Record<string, unknown> = {}> extends Node {
+	export class Timer<T extends Record<string, unknown> = { [key: string]: unknown }> extends Node {
 		constructor(private readonly key_name_: keyof T) {
 			super();
 		}

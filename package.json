@@ -1,56 +1,56 @@
 {
-	"name": "@rbxts/state-management",
-	"version": "0.2.1",
-	"main": "out/init.lua",
-	"scripts": {
-		"build": "rbxtsc --verbose",
-		"watch": "rbxtsc -w --verbose",
-		"prepublishOnly": "npm run build"
-	},
-	"keywords": [
-		"rbxts",
-		"roblox-ts",
-		"state management",
-		"fsm",
-		"behavior tree",
-		"bt",
-		"goap",
-		"ai",
-		"blackboard"
-	],
-	"author": "Catargo",
-	"license": "MIT",
-	"types": "out/index.d.ts",
-	"files": [
-		"out",
-		"!**/*.tsbuildinfo"
-	],
-	"publishConfig": {
-		"access": "public"
-	},
-	"devDependencies": {
-		"@rbxts/compiler-types": "^3.0.0-types.0",
-		"@rbxts/types": "^1.0.857",
-		"@typescript-eslint/eslint-plugin": "^8.33.1",
-		"@typescript-eslint/parser": "^8.33.1",
-		"eslint": "^8.57.1",
-		"eslint-config-prettier": "^10.1.5",
-		"eslint-plugin-prettier": "^5.4.1",
-		"eslint-plugin-roblox-ts": "^0.0.36",
-		"prettier": "^3.5.3",
-		"roblox-ts": "^3.0.0",
-		"typescript": "^5.8.3"
-	},
-	"dependencies": {
-		"@rbxts/services": "^1.5.5"
-	},
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/Velover/state-management-package-rbxts.git"
-	},
-	"bugs": {
-		"url": "https://github.com/Velover/state-management-package-rbxts/issues"
-	},
-	"homepage": "https://github.com/Velover/state-management-package-rbxts#readme",
-	"description": "A comprehensive state management library for roblox-ts, featuring Finite State Machines (FSM), Behavior Trees (BT), Goal Oriented Action Planning (GOAP), and Blackboard systems."
+  "name": "@rbxts/state-management",
+  "version": "0.2.1",
+  "main": "out/init.lua",
+  "scripts": {
+    "build": "rbxtsc --verbose",
+    "watch": "rbxtsc -w --verbose",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "rbxts",
+    "roblox-ts",
+    "state management",
+    "fsm",
+    "behavior tree",
+    "bt",
+    "goap",
+    "ai",
+    "blackboard"
+  ],
+  "author": "Catargo",
+  "license": "MIT",
+  "types": "out/index.d.ts",
+  "files": [
+    "out",
+    "!**/*.tsbuildinfo"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@rbxts/compiler-types": "^3.0.0-types.0",
+    "@rbxts/types": "^1.0.883",
+    "@typescript-eslint/eslint-plugin": "^8.33.1",
+    "@typescript-eslint/parser": "^8.33.1",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^10.1.5",
+    "eslint-plugin-prettier": "^5.4.1",
+    "eslint-plugin-roblox-ts": "^0.0.36",
+    "prettier": "^3.5.3",
+    "roblox-ts": "^3.0.0",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@rbxts/services": "^1.5.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Velover/state-management-package-rbxts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Velover/state-management-package-rbxts/issues"
+  },
+  "homepage": "https://github.com/Velover/state-management-package-rbxts#readme",
+  "description": "A comprehensive state management library for roblox-ts, featuring Finite State Machines (FSM), Behavior Trees (BT), Goal Oriented Action Planning (GOAP), and Blackboard systems."
 }

@@ -746,7 +746,7 @@ export namespace BTree {
 	}
 
 	// Timer - checks if a timer has expired
-	export class Timer<T extends Record<string, unknown> = { [key: string]: unknown }> extends Node {
+	export class Timer<T extends object = { [key: string]: unknown }> extends Node {
 		constructor(private readonly key_name_: keyof T) {
 			super();
 		}

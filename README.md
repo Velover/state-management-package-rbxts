@@ -202,7 +202,9 @@ The FSM supports three types of transitions:
 
 ### Behavior Tree (BT)
 
-Behavior Trees allow for creating complex, hierarchical behaviors with enhanced node types.
+Behavior Trees allow for creating complex, hierarchical behaviors with an extensive set of nodes and advanced features.
+
+#### Basic Behavior Tree Example
 
 ```typescript
 import { BTree, Blackboard } from "@rbxts/state-management";
@@ -210,45 +212,301 @@ import { BTree, Blackboard } from "@rbxts/state-management";
 const blackboard = new Blackboard({
 	hasTarget: false,
 	energyLevel: 100,
-	cooldownTimer: 0,
+	isPatrolling: false,
+	alertLevel: 0,
 });
 
-// Create a behavior tree with enhanced nodes
-const attackSequence = new BTree.Sequence()
-	.AddChild(new BTree.Condition((bb) => bb.GetWild<boolean>("hasTarget") === true))
+// Create composite nodes for complex behaviors
+const findTargetSequence = new BTree.Sequence()
+	.AddChild(new BTree.Condition((bb) => bb.Get("energyLevel") > 20))
 	.AddChild(
+		new BTree.Action((bb) => {
+			print("Searching for target...");
+			// Simulate target detection
+			if (math.random() > 0.7) {
+				bb.Set("hasTarget", true);
+				return BTree.ENodeStatus.SUCCESS;
+			}
+			return BTree.ENodeStatus.FAILURE;
+		}),
+	);
+
+const attackSequence = new BTree.Sequence()
+	.AddChild(new BTree.Condition((bb) => bb.Get("hasTarget") === true))
+	.AddChild(
+		// Cooldown decorator prevents spamming attacks
 		new BTree.Cooldown(
 			new BTree.Action((bb) => {
 				print("Attacking target!");
 				bb.Set("energyLevel", bb.Get("energyLevel") - 10);
+				bb.Set("hasTarget", false); // Target defeated
 				return BTree.ENodeStatus.SUCCESS;
 			}),
 			2.0, // 2 second cooldown
 		),
 	);
 
-// Enhanced parallel execution
-const patrolBehavior = new BTree.Parallel(
-	BTree.EParallelPolicy.ONE, // Success policy: one child succeeds
-	BTree.EParallelPolicy.ONE, // Failure policy: one child fails
-)
+// Main behavior with fallback between different strategies
+const mainBehavior = new BTree.Fallback()
+	.AddChild(attackSequence)
+	.AddChild(findTargetSequence)
 	.AddChild(
 		new BTree.Action((bb) => {
-			// Patrol movement logic
-			print("Patrolling...");
-			return BTree.ENodeStatus.RUNNING;
+			print("Idling...");
+			bb.Set("energyLevel", bb.Get("energyLevel") + 1);
+			return BTree.ENodeStatus.SUCCESS;
 		}),
-	)
-	.AddChild(new BTree.Condition((bb) => bb.GetWild<boolean>("hasTarget") === true));
-
-// Main behavior tree with fallback between attack and patrol
-const mainBehavior = new BTree.Fallback().AddChild(attackSequence).AddChild(patrolBehavior);
+	);
 
 const behaviorTree = new BTree.BehaviorTree(mainBehavior, blackboard);
 
 // In your game loop
 game.GetService("RunService").Heartbeat.Connect((dt) => {
 	behaviorTree.Tick(dt);
+});
+```
+
+#### Advanced Behavior Tree Features
+
+```typescript
+// Enhanced Parallel execution with policies
+const combatBehavior = new BTree.Parallel(
+	BTree.EParallelPolicy.ONE, // Success when one child succeeds
+	BTree.EParallelPolicy.ALL, // Failure when all children fail
+)
+	.AddChild(
+		// Monitor for threats while doing other actions
+		new BTree.Action((bb) => {
+			if (bb.GetWild<number>("alertLevel", 0) > 50) {
+				bb.SetWild("emergencyRetreat", true);
+				return BTree.ENodeStatus.SUCCESS;
+			}
+			return BTree.ENodeStatus.RUNNING;
+		}),
+	)
+	.AddChild(
+		// Main combat actions
+		new BTree.Sequence().AddChild(new BTree.Condition((bb) => bb.Get("hasTarget"))).AddChild(
+			new BTree.Action((bb) => {
+				print("Engaging in combat!");
+				return BTree.ENodeStatus.SUCCESS;
+			}),
+		),
+	);
+
+// Conditional execution with IfThenElse
+const tacticalDecision = new BTree.IfThenElse()
+	.AddChild(new BTree.Condition((bb) => bb.Get("energyLevel") > 50)) // Condition
+	.AddChild(
+		// Then: Aggressive strategy
+		new BTree.Action((bb) => {
+			print("Using aggressive tactics");
+			return BTree.ENodeStatus.SUCCESS;
+		}),
+	)
+	.AddChild(
+		// Else: Defensive strategy
+		new BTree.Action((bb) => {
+			print("Using defensive tactics");
+			return BTree.ENodeStatus.SUCCESS;
+		}),
+	);
+
+// Enhanced retry mechanisms
+const robustAction = new BTree.RetryUntilSuccess(
+	new BTree.Action((bb) => {
+		// Action that might fail but should be retried
+		if (math.random() > 0.3) {
+			print("Action succeeded!");
+			return BTree.ENodeStatus.SUCCESS;
+		}
+		print("Action failed, retrying...");
+		return BTree.ENodeStatus.FAILURE;
+	}),
+	5, // Max 5 attempts
+);
+
+// Timer-based behaviors
+const patrolWithTimeout = new BTree.Timeout(
+	new BTree.Action((bb) => {
+		print("Patrolling...");
+		return BTree.ENodeStatus.RUNNING; // Continues until timeout
+	}),
+	10.0, // 10 second timeout
+	BTree.ETimeoutBehavior.SUCCESS, // Succeed when timeout occurs
+);
+
+// Switch node for state-based decisions
+const weaponSwitch = new BTree.Switch<string>("currentWeapon")
+	.Case(
+		"sword",
+		new BTree.Action((bb) => {
+			print("Using sword combat");
+			return BTree.ENodeStatus.SUCCESS;
+		}),
+	)
+	.Case(
+		"bow",
+		new BTree.Action((bb) => {
+			print("Using ranged combat");
+			return BTree.ENodeStatus.SUCCESS;
+		}),
+	)
+	.Default(
+		new BTree.Action((bb) => {
+			print("Using unarmed combat");
+			return BTree.ENodeStatus.SUCCESS;
+		}),
+	);
+
+// Repeat with conditions
+const patrolLoop = new BTree.Repeat(
+	new BTree.Sequence()
+		.AddChild(
+			new BTree.Action((bb) => {
+				print("Moving to next waypoint");
+				return BTree.ENodeStatus.SUCCESS;
+			}),
+		)
+		.AddChild(new BTree.Wait(2.0)), // Wait 2 seconds at each waypoint
+	5, // Repeat 5 times
+	BTree.ERepeatCondition.SUCCESS, // Only repeat on success
+);
+
+// Timer node for countdown mechanics
+const alertTimer = new BTree.Timer<{ alertTimeLeft: number }>("alertTimeLeft");
+
+// WhileDoElse for continuous monitoring
+const guardBehavior = new BTree.WhileDoElse()
+	.AddChild(new BTree.Condition((bb) => bb.GetWild<boolean>("onDuty", true))) // While on duty
+	.AddChild(
+		// Do: Guard actions
+		new BTree.Sequence()
+			.AddChild(
+				new BTree.Action((bb) => {
+					print("Patrolling area");
+					return BTree.ENodeStatus.SUCCESS;
+				}),
+			)
+			.AddChild(new BTree.Wait(3.0)),
+	)
+	.AddChild(
+		// Else: Off duty actions
+		new BTree.Action((bb) => {
+			print("Taking a break");
+			return BTree.ENodeStatus.SUCCESS;
+		}),
+	);
+```
+
+#### Node Lifecycle and Active Node Tracking
+
+```typescript
+// Custom node with full lifecycle
+class CustomPatrolNode extends BTree.Node {
+	protected OnStart(bb: Blackboard): BTree.ENodeStatus {
+		print("Starting patrol");
+		bb.SetWild("patrolStartTime", tick());
+		return BTree.ENodeStatus.RUNNING;
+	}
+
+	protected OnTick(dt: number, bb: Blackboard): BTree.ENodeStatus {
+		const elapsed = tick() - bb.GetWild<number>("patrolStartTime", 0);
+		print(`Patrolling for ${elapsed} seconds`);
+
+		if (elapsed > 10) {
+			return BTree.ENodeStatus.SUCCESS;
+		}
+		return BTree.ENodeStatus.RUNNING;
+	}
+
+	protected OnFinish(status: BTree.ENodeStatus, bb: Blackboard): void {
+		print(`Patrol finished with status: ${status}`);
+		bb.SetWild("patrolEndTime", tick());
+	}
+
+	protected OnHalt(bb: Blackboard): void {
+		print("Patrol was interrupted");
+		bb.SetWild("patrolInterrupted", true);
+	}
+
+	public OnActivated(bb: Blackboard): void {
+		print("Patrol node activated");
+	}
+
+	public OnDeactivated(bb: Blackboard): void {
+		print("Patrol node deactivated");
+	}
+}
+
+// Track active nodes for debugging
+const behaviorTree = new BTree.BehaviorTree(mainBehavior, blackboard);
+
+game.GetService("RunService").Heartbeat.Connect((dt) => {
+	const status = behaviorTree.Tick(dt);
+	const activeNodes = behaviorTree.GetActiveNodes();
+	print(`Active nodes: ${activeNodes.size()}, Tree status: ${status}`);
+});
+```
+
+#### Cross-System Integration with Connectors
+
+```typescript
+// Embed FSM within Behavior Tree
+const fsmConnector = new BTree.FSMConnector(guardFSM);
+
+const guardWithFSM = new BTree.Sequence()
+	.AddChild(new BTree.Condition((bb) => bb.Get("shouldActivateGuard")))
+	.AddChild(fsmConnector); // FSM runs as a behavior tree node
+
+// Embed GOAP agent within Behavior Tree
+const goapConnector = new BTree.GoapConnector(combatAgent);
+
+const tacticalBehavior = new BTree.Fallback()
+	.AddChild(goapConnector) // GOAP planning for complex scenarios
+	.AddChild(
+		// Fallback to simple behavior if GOAP fails
+		new BTree.Action((bb) => {
+			print("Using simple fallback behavior");
+			return BTree.ENodeStatus.SUCCESS;
+		}),
+	);
+
+// SubTree for modular behavior composition
+const combatSubTree = new BTree.BehaviorTree(combatBehavior, blackboard);
+const mainBehaviorWithSubTree = new BTree.Sequence()
+	.AddChild(new BTree.Condition((bb) => bb.Get("inCombat")))
+	.AddChild(new BTree.SubTree(combatSubTree));
+```
+
+#### Enhanced Decorators
+
+```typescript
+// Force nodes to always succeed or fail
+const alwaysSucceed = new BTree.ForceSuccess(
+	new BTree.Action((bb) => {
+		// This might fail, but ForceSuccess ensures SUCCESS
+		return math.random() > 0.5 ? BTree.ENodeStatus.SUCCESS : BTree.ENodeStatus.FAILURE;
+	}),
+);
+
+// Fire and forget for side effects
+const logAction = new BTree.FireAndForget(
+	new BTree.Action((bb) => {
+		print("This action runs but its result is ignored");
+		return BTree.ENodeStatus.FAILURE; // Result ignored
+	}),
+);
+
+// Invert results
+const invertedCondition = new BTree.Inverter(
+	new BTree.Condition((bb) => bb.Get("enemyNearby")), // Returns true when enemy NOT nearby
+);
+
+// Callback for simple side effects
+const simpleCallback = new BTree.Callback((bb, dt) => {
+	bb.SetWild("lastUpdateTime", tick());
+	print("Callback executed");
 });
 ```
 
@@ -364,32 +622,38 @@ game.GetService("RunService").Heartbeat.Connect((dt) => {
 
 ### Behavior Tree Enhancements
 
-- **Timer Node**: `Timer` - Manages countdown timers stored in blackboard.
-- **Enhanced Parallel**: Uses `EParallelPolicy` enum for clearer success/failure policies.
-- **Improved Cooldown**: `Cooldown` decorator with configurable reset behavior.
-- **Memory Sequences**: Better state management for interrupted sequences.
+- **Complete Node Set**: 20+ node types including advanced composites, decorators, and utility nodes
+- **Node Lifecycle**: Full `OnStart()`, `OnTick()`, `OnFinish()`, `OnHalt()`, `OnActivated()`, `OnDeactivated()` lifecycle
+- **Active Node Tracking**: Monitor which nodes are currently active for debugging and analysis
+- **Enhanced Parallel**: Configurable success/failure policies with `EParallelPolicy`
+- **Advanced Decorators**: `Timeout`, `Cooldown`, `Retry`, `Inverter`, `ForceSuccess/Failure`, and more
+- **Control Flow Nodes**: `IfThenElse`, `WhileDoElse`, `Switch`, `Repeat` for complex logic
+- **Timer Management**: `Timer` and `Wait` nodes for time-based behaviors
+- **Memory Sequences**: Better state management for interrupted sequences
+- **SubTree Support**: Compose behaviors from multiple behavior trees
 
 ### GOAP Enhancements
 
-- **Typed WorldState**: Generic support for typed world state data.
-- **Weighted Requirements**: Goals can have weighted requirements for better planning.
-- **Hierarchical Goals**: Composite goals that decompose into sub-goals.
-- **Dynamic Priorities**: Goal priorities can be functions of world state and agent.
-- **Enhanced Effects**: New effects like `IncrementClamp`, `DecrementClamp` with bounds.
-- **Performance Optimization**: Improved planning algorithms and state management.
+- **Typed WorldState**: Generic support for typed world state data
+- **Weighted Requirements**: Goals can have weighted requirements for better planning
+- **Hierarchical Goals**: Composite goals that decompose into sub-goals
+- **Dynamic Priorities**: Goal priorities can be functions of world state and agent
+- **Enhanced Effects**: New effects like `IncrementClamp`, `DecrementClamp` with bounds
+- **Performance Optimization**: Improved planning algorithms and state management
 
 ### Cross-System Integration
 
-- **FSMConnector**: Use FSMs within GOAP actions or Behavior Tree nodes.
-- **BTConnector**: Embed Behavior Trees in GOAP actions.
-- **GoapConnector**: Run GOAP agents as Behavior Tree nodes or FSM states.
+- **FSMConnector**: Use FSMs within GOAP actions or Behavior Tree nodes
+- **BTConnector**: Embed Behavior Trees in GOAP actions
+- **GoapConnector**: Run GOAP agents as Behavior Tree nodes or FSM states
+- **SubTree**: Compose complex behaviors from multiple behavior trees
 
 ## Modules
 
-- **`Blackboard`**: Enhanced data store with update callbacks and type safety.
-- **`FSM`**: Complete finite state machine with priority-based transitions.
-- **`BTree`**: Comprehensive behavior tree implementation with 20+ node types.
-- **`Goap`**: Advanced goal-oriented action planning with hierarchical goals.
+- **`Blackboard`**: Enhanced data store with update callbacks and type safety
+- **`FSM`**: Complete finite state machine with priority-based transitions
+- **`BTree`**: Comprehensive behavior tree implementation with 20+ node types
+- **`Goap`**: Advanced goal-oriented action planning with hierarchical goals
 
 ## Performance
 

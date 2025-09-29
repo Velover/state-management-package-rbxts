@@ -1011,7 +1011,7 @@ export namespace BTree {
 	}
 
 	/**
-	 * A node that executes a callback function.
+	 * A node that executes a callback function with success.
 	 */
 	export class Callback extends Node {
 		constructor(private readonly callback_: (bb: Blackboard, dt: number) => void) {

@@ -1,7 +1,7 @@
 //native
 //optimize 2
-import { FSM } from "./FSM";
 import { Blackboard } from "./Blackboard";
+import { FSM } from "./FSM";
 import type { Goap } from "./Goap";
 
 export namespace BTree {
@@ -34,11 +34,22 @@ export namespace BTree {
 		SUCCESS = "SUCCESS",
 	}
 
-	// Base node class
+	/** Base node class */
 	export abstract class Node {
 		protected state_: ENodeState = ENodeState.IDLE;
 
-		public Tick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		public Tick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			if (!old_active_nodes.has(this)) {
+				this.OnActivated(bb);
+			}
+			new_active_nodes.add(this);
+
 			if (this.state_ === ENodeState.IDLE) {
 				this.state_ = ENodeState.RUNNING;
 				const start_status = this.OnStart(bb);
@@ -51,10 +62,10 @@ export namespace BTree {
 			}
 
 			if (this.state_ === ENodeState.RUNNING) {
-				const status = this.OnTick(dt, bb, active_nodes);
+				const status = this.OnTick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 
 				if (status === ENodeStatus.RUNNING) {
-					active_nodes.add(this);
+					running_nodes.add(this);
 				}
 
 				if (status !== ENodeStatus.RUNNING) {
@@ -66,6 +77,7 @@ export namespace BTree {
 			}
 
 			// Handle HALTED state - node was interrupted
+			// Cant normally happen during Tick, but just in case
 			if (this.state_ === ENodeState.HALTED) {
 				this.state_ = ENodeState.IDLE;
 				return ENodeStatus.FAILURE;
@@ -85,22 +97,43 @@ export namespace BTree {
 			return this.state_ === ENodeState.RUNNING;
 		}
 
-		protected abstract OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus;
+		/** Called every tick while the node is running */
+		protected abstract OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus;
 
+		/** Called as initialization, if returns RUNNING, OnTick will be called */
 		protected OnStart(bb: Blackboard): ENodeStatus {
 			// Default implementation - can be overridden
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnFinish(status: ENodeStatus, bb: Blackboard): void {
-			// Default implementation - can be overridden
-		}
+		/** Default implementation - can be overridden
+		 * Called when OnTick returns SUCCESS or FAILURE
+		 */
+		protected OnFinish(status: ENodeStatus, bb: Blackboard): void {}
 
-		/** Default implementation - can be overridden*/
+		/** Default implementation - can be overridden
+		 * Called when the node is aborted (Halt is called)
+		 */
 		protected OnHalt(bb: Blackboard): void {}
+
+		/** Default implementation - can be overridden
+		 * Called when the node wasnt called in previous iteration but is called now
+		 */
+		public OnActivated(bb: Blackboard): void {}
+
+		/** Default implementation - can be overridden
+		 * Called when the node was called in previous iteration but is not called now
+		 */
+		public OnDeactivated(bb: Blackboard): void {}
 	}
 
-	// Composite nodes (can have multiple children)
+	/** Composite nodes (can have multiple children) */
 	export abstract class Composite extends Node {
 		protected children_: Node[] = [];
 
@@ -131,7 +164,7 @@ export namespace BTree {
 		}
 	}
 
-	// Sequence - runs children in order until one fails
+	/** Sequence - runs children in order until one fails */
 	export class Sequence extends Composite {
 		private current_index_ = 0;
 
@@ -140,9 +173,21 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			for (let i = this.current_index_; i < this.children_.size(); i++) {
-				const status = this.children_[i].Tick(dt, bb, active_nodes);
+				const status = this.children_[i].Tick(
+					dt,
+					bb,
+					running_nodes,
+					new_active_nodes,
+					old_active_nodes,
+				);
 
 				if (status === ENodeStatus.RUNNING) {
 					this.current_index_ = i;
@@ -156,15 +201,27 @@ export namespace BTree {
 		}
 	}
 
-	// Sequence - runs children in order until one fails
+	/** Sequence - runs children in order until one fails */
 	export class ReactiveSequence extends Composite {
 		protected override OnStart(bb: Blackboard): ENodeStatus {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			for (let i = 0; i < this.children_.size(); i++) {
-				const status = this.children_[i].Tick(dt, bb, active_nodes);
+				const status = this.children_[i].Tick(
+					dt,
+					bb,
+					running_nodes,
+					new_active_nodes,
+					old_active_nodes,
+				);
 
 				if (status === ENodeStatus.RUNNING) {
 					this.HaltOtherChildren(this.children_[i], bb);
@@ -177,15 +234,27 @@ export namespace BTree {
 		}
 	}
 
-	// Memory Sequence - remembers which child failed
+	/** Memory Sequence - remembers which child failed */
 	export class MemorySequence extends Composite {
 		private current_index_ = 0;
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			if (this.children_.size() === 0) return ENodeStatus.SUCCESS;
 
 			for (let i = this.current_index_; i < this.children_.size(); i++) {
-				const status = this.children_[i].Tick(dt, bb, active_nodes);
+				const status = this.children_[i].Tick(
+					dt,
+					bb,
+					running_nodes,
+					new_active_nodes,
+					old_active_nodes,
+				);
 
 				this.current_index_ = i;
 				if (status === ENodeStatus.RUNNING) {
@@ -201,7 +270,7 @@ export namespace BTree {
 		}
 	}
 
-	// Fallback - runs children in order until one succeeds
+	/** Fallback - runs children in order until one succeeds */
 	export class Fallback extends Composite {
 		private current_index_ = 0;
 
@@ -210,9 +279,21 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			for (let i = this.current_index_; i < this.children_.size(); i++) {
-				const status = this.children_[i].Tick(dt, bb, active_nodes);
+				const status = this.children_[i].Tick(
+					dt,
+					bb,
+					running_nodes,
+					new_active_nodes,
+					old_active_nodes,
+				);
 
 				if (status === ENodeStatus.RUNNING) {
 					this.current_index_ = i;
@@ -226,16 +307,28 @@ export namespace BTree {
 		}
 	}
 
-	// ReactiveFallback - like Fallback but restarts from beginning when child returns RUNNING
+	/** ReactiveFallback - like Fallback but restarts from beginning when child returns RUNNING */
 	export class ReactiveFallback extends Composite {
 		protected override OnStart(bb: Blackboard): ENodeStatus {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			// Always start from beginning (reactive behavior)
 			for (let i = 0; i < this.children_.size(); i++) {
-				const status = this.children_[i].Tick(dt, bb, active_nodes);
+				const status = this.children_[i].Tick(
+					dt,
+					bb,
+					running_nodes,
+					new_active_nodes,
+					old_active_nodes,
+				);
 
 				if (status === ENodeStatus.SUCCESS) {
 					// Halt subsequent children
@@ -254,7 +347,7 @@ export namespace BTree {
 		}
 	}
 
-	// Parallel - runs all children simultaneously
+	/** Parallel - runs all children simultaneously */
 	export class Parallel extends Composite {
 		constructor(
 			private success_policy_: EParallelPolicy = EParallelPolicy.ALL,
@@ -263,12 +356,18 @@ export namespace BTree {
 			super();
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			let success_count = 0;
 			let failure_count = 0;
 
 			for (const child of this.children_) {
-				const status = child.Tick(dt, bb, active_nodes);
+				const status = child.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 
 				if (status === ENodeStatus.SUCCESS) {
 					success_count++;
@@ -299,7 +398,7 @@ export namespace BTree {
 		}
 	}
 
-	// Decorator base class
+	/** Decorator base class */
 	export abstract class Decorator extends Node {
 		constructor(protected child_: Node) {
 			super();
@@ -310,10 +409,16 @@ export namespace BTree {
 		}
 	}
 
-	// Inverter - inverts SUCCESS/FAILURE results
+	/** Inverter - inverts SUCCESS/FAILURE results */
 	export class Inverter extends Decorator {
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			const status = this.child_.Tick(dt, bb, active_nodes);
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			const status = this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 
 			if (status === ENodeStatus.SUCCESS) return ENodeStatus.FAILURE;
 			else if (status === ENodeStatus.FAILURE) return ENodeStatus.SUCCESS;
@@ -322,10 +427,16 @@ export namespace BTree {
 		}
 	}
 
-	// ForceSuccess - always returns SUCCESS unless child is RUNNING
+	/** ForceSuccess - always returns SUCCESS unless child is RUNNING */
 	export class ForceSuccess extends Decorator {
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			const status = this.child_.Tick(dt, bb, active_nodes);
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			const status = this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 
 			if (status === ENodeStatus.RUNNING) return ENodeStatus.RUNNING;
 
@@ -333,10 +444,16 @@ export namespace BTree {
 		}
 	}
 
-	// ForceFailure - always returns FAILURE unless child is RUNNING
+	/** ForceFailure - always returns FAILURE unless child is RUNNING */
 	export class ForceFailure extends Decorator {
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			const status = this.child_.Tick(dt, bb, active_nodes);
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			const status = this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 
 			if (status === ENodeStatus.RUNNING) return ENodeStatus.RUNNING;
 
@@ -344,15 +461,21 @@ export namespace BTree {
 		}
 	}
 
-	// FireAndForget - executes child and ignores its result
+	/** FireAndForget - executes child and ignores its result */
 	export class FireAndForget extends Decorator {
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			this.child_.Tick(dt, bb, active_nodes);
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 			return ENodeStatus.SUCCESS;
 		}
 	}
 
-	// Timeout - fails child if it takes longer than specified time
+	/** Timeout - fails child if it takes longer than specified time*/
 	export class Timeout extends Decorator {
 		private time_left_: number = 0;
 
@@ -369,7 +492,13 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			this.time_left_ -= dt;
 
 			if (this.time_left_ <= 0) {
@@ -379,11 +508,11 @@ export namespace BTree {
 					: ENodeStatus.SUCCESS;
 			}
 
-			return this.child_.Tick(dt, bb, active_nodes);
+			return this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 		}
 	}
 
-	// IfThenElse - conditional execution (2-3 children)
+	/** IfThenElse - conditional execution (2-3 children) */
 	export class IfThenElse extends Composite {
 		private current_child_: number = -1;
 
@@ -392,14 +521,26 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			if (this.children_.size() < 2 || this.children_.size() > 3) {
 				throw "IfThenElse must have exactly 2 or 3 children";
 			}
 
 			// If we're continuing with a running child
 			if (this.current_child_ > 0) {
-				const status = this.children_[this.current_child_].Tick(dt, bb, active_nodes);
+				const status = this.children_[this.current_child_].Tick(
+					dt,
+					bb,
+					running_nodes,
+					new_active_nodes,
+					old_active_nodes,
+				);
 				if (status !== ENodeStatus.RUNNING) {
 					this.current_child_ = -1;
 				}
@@ -407,7 +548,13 @@ export namespace BTree {
 			}
 
 			// Evaluate condition (first child)
-			const condition_status = this.children_[0].Tick(dt, bb, active_nodes);
+			const condition_status = this.children_[0].Tick(
+				dt,
+				bb,
+				running_nodes,
+				new_active_nodes,
+				old_active_nodes,
+			);
 
 			if (condition_status === ENodeStatus.RUNNING) {
 				return ENodeStatus.RUNNING;
@@ -417,13 +564,13 @@ export namespace BTree {
 			if (condition_status === ENodeStatus.SUCCESS) {
 				// Execute THEN branch (second child)
 				this.current_child_ = 1;
-				return this.children_[1].Tick(dt, bb, active_nodes);
+				return this.children_[1].Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 			}
 
 			// Execute ELSE branch (third child) if it exists
 			if (this.children_.size() === 3) {
 				this.current_child_ = 2;
-				return this.children_[2].Tick(dt, bb, active_nodes);
+				return this.children_[2].Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 			}
 
 			return ENodeStatus.FAILURE;
@@ -435,7 +582,7 @@ export namespace BTree {
 		}
 	}
 
-	// WhileDoElse - loop execution with condition checking
+	/** WhileDoElse - loop execution with condition checking */
 	export class WhileDoElse extends Composite {
 		private current_child_: number = -1;
 
@@ -444,7 +591,13 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			if (this.children_.size() < 2 || this.children_.size() > 3) {
 				throw "WhileDoElse must have exactly 2 or 3 children";
 			}
@@ -452,7 +605,13 @@ export namespace BTree {
 			// If a child is running, continue with it unless condition changed
 			if (this.current_child_ > 0) {
 				// Re-evaluate condition first
-				const condition_status = this.children_[0].Tick(dt, bb, active_nodes);
+				const condition_status = this.children_[0].Tick(
+					dt,
+					bb,
+					running_nodes,
+					new_active_nodes,
+					old_active_nodes,
+				);
 
 				if (condition_status === ENodeStatus.RUNNING) {
 					return ENodeStatus.RUNNING;
@@ -469,11 +628,23 @@ export namespace BTree {
 					return ENodeStatus.FAILURE;
 				}
 
-				return this.children_[this.current_child_].Tick(dt, bb, active_nodes);
+				return this.children_[this.current_child_].Tick(
+					dt,
+					bb,
+					running_nodes,
+					new_active_nodes,
+					old_active_nodes,
+				);
 			}
 
 			// Evaluate condition (first child)
-			const condition_status = this.children_[0].Tick(dt, bb, active_nodes);
+			const condition_status = this.children_[0].Tick(
+				dt,
+				bb,
+				running_nodes,
+				new_active_nodes,
+				old_active_nodes,
+			);
 
 			if (condition_status === ENodeStatus.RUNNING) {
 				return ENodeStatus.RUNNING;
@@ -482,19 +653,19 @@ export namespace BTree {
 			// Execute appropriate branch based on condition
 			if (condition_status === ENodeStatus.SUCCESS) {
 				this.current_child_ = 1;
-				return this.children_[1].Tick(dt, bb, active_nodes);
+				return this.children_[1].Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 			}
 
 			if (this.children_.size() === 3) {
 				this.current_child_ = 2;
-				return this.children_[2].Tick(dt, bb, active_nodes);
+				return this.children_[2].Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 			}
 
 			return ENodeStatus.FAILURE;
 		}
 	}
 
-	// RepeatUntilSuccess - retries child until it succeeds with max attempts
+	/** RepeatUntilSuccess - retries child until it succeeds with max attempts */
 	export class RetryUntilSuccess extends Decorator {
 		private current_attempts_ = 0;
 		constructor(
@@ -504,8 +675,14 @@ export namespace BTree {
 			super(child);
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			const status = this.child_.Tick(dt, bb, active_nodes);
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			const status = this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 			if (status === ENodeStatus.SUCCESS) return status;
 
 			if (status === ENodeStatus.FAILURE) {
@@ -526,7 +703,7 @@ export namespace BTree {
 		}
 	}
 
-	// RetryUntilFailure - retries child until it fails with max attempts
+	/** RetryUntilFailure - retries child until it fails with max attempts */
 	export class RetryUntilFailure extends Decorator {
 		private current_attempts_ = 0;
 		constructor(
@@ -536,8 +713,14 @@ export namespace BTree {
 			super(child);
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
-			const status = this.child_.Tick(dt, bb, active_nodes);
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			const status = this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 
 			if (status === ENodeStatus.FAILURE) return ENodeStatus.FAILURE;
 
@@ -556,18 +739,18 @@ export namespace BTree {
 		}
 	}
 
-	// Action node - performs an action
+	/** Action node - performs an action */
 	export class Action extends Node {
 		constructor(private readonly action_: (bb: Blackboard, dt: number) => ENodeStatus) {
 			super();
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(dt: number, bb: Blackboard, running_nodes: Set<Node>): ENodeStatus {
 			return this.action_(bb, dt);
 		}
 	}
 
-	// Condition node - checks a condition
+	/** Condition node - checks a condition */
 	export class Condition extends Node {
 		constructor(
 			private readonly condition_: (bb: Blackboard, dt: number) => Promise<boolean> | boolean,
@@ -575,12 +758,12 @@ export namespace BTree {
 			super();
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(dt: number, bb: Blackboard, running_nodes: Set<Node>): ENodeStatus {
 			return this.condition_(bb, dt) ? ENodeStatus.SUCCESS : ENodeStatus.FAILURE;
 		}
 	}
 
-	// Switch - selects a child based on a blackboard value
+	/** Switch - selects a child based on a blackboard value */
 	export class Switch<T> extends Node {
 		private cases_: Map<T, Node> = new Map();
 		private default_node_?: Node;
@@ -616,9 +799,15 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			if (this.active_node_ !== undefined) {
-				return this.active_node_.Tick(dt, bb, active_nodes);
+				return this.active_node_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 			}
 			return ENodeStatus.FAILURE;
 		}
@@ -635,7 +824,7 @@ export namespace BTree {
 		}
 	}
 
-	// Repeat - repeats its child a specified number of times
+	/** Repeat - repeats its child a specified number of times */
 	export class Repeat extends Decorator {
 		private current_count_ = 0;
 
@@ -652,12 +841,18 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			if (this.current_count_ >= this.repeat_count_) {
 				return ENodeStatus.SUCCESS;
 			}
 
-			const status = this.child_.Tick(dt, bb, active_nodes);
+			const status = this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 
 			if (status === ENodeStatus.RUNNING) {
 				return ENodeStatus.RUNNING;
@@ -690,7 +885,7 @@ export namespace BTree {
 		}
 	}
 
-	// Wait - waits for a specified duration
+	/** Wait - waits for a specified duration */
 	export class Wait extends Node {
 		private time_left_ = 0;
 
@@ -703,7 +898,7 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(dt: number, bb: Blackboard, running_nodes: Set<Node>): ENodeStatus {
 			this.time_left_ -= dt;
 
 			if (this.time_left_ <= 0) {
@@ -726,11 +921,17 @@ export namespace BTree {
 			super(child);
 		}
 
-		protected OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
 			this.time_left_ -= dt;
 
 			if (this.time_left_ > 0) return ENodeStatus.FAILURE;
-			const status = this.child_.Tick(dt, bb, active_nodes);
+			const status = this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
 			return status;
 		}
 
@@ -751,7 +952,7 @@ export namespace BTree {
 			super();
 		}
 
-		protected override OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected override OnTick(dt: number, bb: Blackboard, running_nodes: Set<Node>): ENodeStatus {
 			if (!bb.HasWild(this.key_name_ as string)) return ENodeStatus.FAILURE;
 			const time_left = bb.UpdateWild<number>(this.key_name_ as string, (v) => v! - dt);
 			return time_left <= 0 ? ENodeStatus.SUCCESS : ENodeStatus.FAILURE;
@@ -799,7 +1000,7 @@ export namespace BTree {
 			return ENodeStatus.RUNNING;
 		}
 
-		protected override OnTick(dt: number, bb: Blackboard, active_nodes: Set<Node>): ENodeStatus {
+		protected override OnTick(dt: number, bb: Blackboard, running_nodes: Set<Node>): ENodeStatus {
 			this.goap_.Update(dt);
 			return ENodeStatus.RUNNING;
 		}
@@ -809,8 +1010,28 @@ export namespace BTree {
 		}
 	}
 
+	/**
+	 * A node that executes a callback function.
+	 */
+	export class Callback extends Node {
+		constructor(private readonly callback_: (bb: Blackboard, dt: number) => void) {
+			super();
+		}
+
+		protected override OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+		): ENodeStatus {
+			this.callback_(bb, dt);
+			return ENodeStatus.SUCCESS;
+		}
+	}
+
 	// Main BehaviorTree class with active node tracking
 	export class BehaviorTree {
+		private running_nodes_: Set<Node> = new Set();
 		private active_nodes_: Set<Node> = new Set();
 
 		constructor(
@@ -819,23 +1040,37 @@ export namespace BTree {
 		) {}
 
 		public Tick(dt: number): ENodeStatus {
+			const new_running_nodes = new Set<Node>();
 			const new_active_nodes = new Set<Node>();
-			const status = this.root_.Tick(dt, this.blackboard_, new_active_nodes);
+			const status = this.root_.Tick(
+				dt,
+				this.blackboard_,
+				new_running_nodes,
+				new_active_nodes,
+				this.active_nodes_,
+			);
 
 			// Halt nodes that were active but are no longer traversed
-			for (const node of this.active_nodes_) {
-				if (!new_active_nodes.has(node)) {
+			for (const node of this.running_nodes_) {
+				if (!new_running_nodes.has(node)) {
 					node.Halt(this.blackboard_);
 				}
 			}
 
+			for (const node of this.active_nodes_) {
+				if (!new_active_nodes.has(node)) {
+					node.OnDeactivated(this.blackboard_);
+				}
+			}
+
+			this.running_nodes_ = new_running_nodes;
 			this.active_nodes_ = new_active_nodes;
 			return status;
 		}
 
 		public Halt(): void {
 			this.root_.Halt(this.blackboard_);
-			this.active_nodes_.clear();
+			this.running_nodes_.clear();
 		}
 
 		public GetBlackboard(): Blackboard {
@@ -847,7 +1082,7 @@ export namespace BTree {
 		}
 
 		public GetActiveNodes(): Set<Node> {
-			return table.clone(this.active_nodes_);
+			return table.clone(this.running_nodes_);
 		}
 	}
 }

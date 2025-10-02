@@ -1,5 +1,5 @@
-//native
-//optimize 2
+//!native
+//!optimize 2
 
 import { BTree } from "./BehaviorTree";
 import { Blackboard } from "./Blackboard";

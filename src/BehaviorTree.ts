@@ -1,5 +1,5 @@
-//native
-//optimize 2
+//!native
+//!optimize 2
 
 import { Blackboard } from "./Blackboard";
 import { FSM } from "./FSM";

@@ -1,5 +1,5 @@
-//native
-//optimize 2
+//!native
+//!optimize 2
 
 export class Blackboard<TRecord extends object = object> {
 	protected data_ = new Map<string, unknown>();

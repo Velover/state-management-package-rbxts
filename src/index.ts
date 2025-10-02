@@ -1,4 +1,5 @@
 export { BTree } from "./BehaviorTree";
 export { Blackboard } from "./Blackboard";
-export { Goap } from "./Goap";
+export { BTCreator } from "./BTCreator";
 export { FSM } from "./FSM";
+export { Goap } from "./Goap";

@@ -125,8 +125,12 @@ export class BTCreator {
 	private data_?: IFileStructure;
 	private created_nodes_map_ = new Map<string, BTree.Node>();
 
-	private actions_registry_map_ = new Map<string, (bb: Blackboard) => BTree.ENodeStatus>();
-	private condition_registry_map_ = new Map<string, (bb: Blackboard) => boolean>();
+	private actions_registry_map_ = new Map<
+		string,
+		(bb: Blackboard, dt: number) => BTree.ENodeStatus
+	>();
+	private condition_registry_map_ = new Map<string, (bb: Blackboard, dt: number) => boolean>();
+	private callback_registry_map_ = new Map<string, (bb: Blackboard, dt: number) => void>();
 	private sub_tree_registry_map_ = new Map<string, (bb: Blackboard) => BTree.BehaviorTree>();
 
 	private current_node_id_?: string;
@@ -260,14 +264,20 @@ export class BTCreator {
 		return this.current_blackboard_;
 	}
 
-	public RegisterAction(action_name: string, action: (bb: Blackboard) => BTree.ENodeStatus): void {
+	public RegisterAction(
+		action_name: string,
+		action: (bb: Blackboard, dt: number) => BTree.ENodeStatus,
+	): void {
 		if (this.actions_registry_map_.has(action_name)) {
 			throw `Action '${action_name}' already registered.`;
 		}
 		this.actions_registry_map_.set(action_name, action);
 	}
 
-	public RegisterCondition(condition_name: string, condition: (bb: Blackboard) => boolean): void {
+	public RegisterCondition(
+		condition_name: string,
+		condition: (bb: Blackboard, dt: number) => boolean,
+	): void {
 		if (this.condition_registry_map_.has(condition_name)) {
 			throw `Condition '${condition_name}' already registered.`;
 		}
@@ -284,7 +294,25 @@ export class BTCreator {
 		this.sub_tree_registry_map_.set(sub_tree_name, sub_tree);
 	}
 
-	private GetAction(action_name: string): (bb: Blackboard) => BTree.ENodeStatus {
+	public RegisterCallback(
+		callback_name: string,
+		callback: (bb: Blackboard, dt: number) => void,
+	): void {
+		if (this.callback_registry_map_.has(callback_name)) {
+			throw `Callback '${callback_name}' already registered.`;
+		}
+		this.callback_registry_map_.set(callback_name, callback);
+	}
+
+	private GetCallback(callback_name: string): (bb: Blackboard, dt: number) => void {
+		const callback = this.callback_registry_map_.get(callback_name);
+		if (callback === undefined) {
+			throw `Callback '${callback_name}' not found.`;
+		}
+		return callback;
+	}
+
+	private GetAction(action_name: string): (bb: Blackboard, dt: number) => BTree.ENodeStatus {
 		const action = this.actions_registry_map_.get(action_name);
 		if (action === undefined) {
 			throw `Action '${action_name}' not found.`;
@@ -292,7 +320,7 @@ export class BTCreator {
 		return action;
 	}
 
-	private GetCondition(condition_name: string): (bb: Blackboard) => boolean {
+	private GetCondition(condition_name: string): (bb: Blackboard, dt: number) => boolean {
 		const condition = this.condition_registry_map_.get(condition_name);
 		if (condition === undefined) {
 			throw `Condition '${condition_name}' not found.`;
@@ -531,6 +559,12 @@ export class BTCreator {
 				switch_node.Default(default_node);
 			}
 			return switch_node;
+		});
+
+		this.AddNodeCreator("Callback", (creator) => {
+			const callback_name = creator.GetCurrentNodeParameter("callbackName", "string");
+			const callback = creator.GetCallback(callback_name);
+			return new BTree.Callback(callback);
 		});
 	}
 }

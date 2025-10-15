@@ -476,6 +476,21 @@ export namespace BTree {
 		}
 	}
 
+	/** RunningGate - executes child and returns FAILURE if child is Running */
+	export class RunningGate extends Decorator {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			const status = this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
+			if (status === ENodeStatus.RUNNING) return ENodeStatus.FAILURE;
+			return status;
+		}
+	}
+
 	/** Timeout - fails child if it takes longer than specified time*/
 	export class Timeout extends Decorator {
 		private time_left_: number = 0;
@@ -908,6 +923,102 @@ export namespace BTree {
 
 			return ENodeStatus.RUNNING;
 		}
+	}
+
+	/** Wait - waits for a specified duration, but doesnt return RUNNING */
+	export class WaitGate extends Node {
+		private time_left_ = 0;
+
+		constructor(private duration_s_: number) {
+			super();
+		}
+
+		public override OnActivated(bb: Blackboard): void {
+			this.time_left_ = this.duration_s_;
+		}
+
+		protected OnTick(dt: number, bb: Blackboard, running_nodes: Set<Node>): ENodeStatus {
+			this.time_left_ -= dt;
+
+			if (this.time_left_ <= 0) {
+				this.time_left_ = this.duration_s_;
+				return ENodeStatus.SUCCESS;
+			}
+
+			return ENodeStatus.FAILURE;
+		}
+	}
+
+	/** faster way of creating a node with all callbacks */
+	export class FullAction extends Node {
+		constructor(
+			private readonly config_: {
+				OnActivated?: (bb: Blackboard) => void;
+				OnDeactivated?: (bb: Blackboard) => void;
+				OnStart?: (bb: Blackboard) => ENodeStatus | undefined | void;
+				OnTick?: (
+					dt: number,
+					bb: Blackboard,
+					running_nodes: Set<Node>,
+					new_active_nodes: Set<Node>,
+					old_active_nodes: Set<Node>,
+				) => ENodeStatus | undefined | void;
+				OnHalt?: (bb: Blackboard) => void;
+				OnFinish?: (status: ENodeStatus, bb: Blackboard) => void;
+			},
+		) {
+			super();
+		}
+
+		public override OnActivated(bb: Blackboard): void {
+			this.config_.OnActivated?.(bb);
+		}
+
+		protected override OnStart(bb: Blackboard): ENodeStatus {
+			return this.config_.OnStart?.(bb) ?? ENodeStatus.RUNNING;
+		}
+
+		protected override OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			return (
+				this.config_.OnTick?.(dt, bb, running_nodes, new_active_nodes, old_active_nodes) ??
+				ENodeStatus.SUCCESS
+			);
+		}
+
+		protected override OnHalt(bb: Blackboard): void {
+			this.config_.OnHalt?.(bb);
+		}
+
+		protected override OnFinish(status: ENodeStatus, bb: Blackboard): void {
+			this.config_.OnFinish?.(status, bb);
+		}
+
+		public override OnDeactivated(bb: Blackboard): void {
+			this.config_.OnDeactivated?.(bb);
+		}
+	}
+
+	export function CreateFullAction(config: {
+		OnActivated?: (bb: Blackboard) => void;
+		OnDeactivated?: (bb: Blackboard) => void;
+		OnStart?: (bb: Blackboard) => ENodeStatus | undefined | void;
+		OnTick?: (
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		) => ENodeStatus | undefined | void;
+		OnHalt?: (bb: Blackboard) => void;
+		OnFinish?: (status: ENodeStatus, bb: Blackboard) => void;
+	}) {
+		return new FullAction(config);
 	}
 
 	// Cooldown - enforces a cooldown period after child execution

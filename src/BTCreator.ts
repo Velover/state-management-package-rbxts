@@ -446,6 +446,12 @@ export class BTCreator {
 			return new BTree.FireAndForget(child_node);
 		});
 
+		this.AddNodeCreator("RunningGate", (creator) => {
+			const child_id = creator.GetCurrentNodeData().children[0];
+			const child_node = creator.GetCreatedNode(child_id);
+			return new BTree.RunningGate(child_node);
+		});
+
 		this.AddNodeCreator("IfThenElse", (creator) => {
 			const node_data = creator.GetCurrentNodeData();
 			const if_then_else = new BTree.IfThenElse();
@@ -481,6 +487,10 @@ export class BTCreator {
 		this.AddNodeCreator("Wait", (creator) => {
 			const duration = creator.GetCurrentNodeParameter("duration", "number");
 			return new BTree.Wait(duration);
+		});
+		this.AddNodeCreator("WaitGate", (creator) => {
+			const duration = creator.GetCurrentNodeParameter("duration", "number");
+			return new BTree.WaitGate(duration);
 		});
 
 		this.AddNodeCreator("Timer", (creator) => {

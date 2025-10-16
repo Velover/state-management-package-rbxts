@@ -342,11 +342,11 @@ export class BTCreator {
 	): T extends "string" ? string : number {
 		const node_data = this.GetCurrentNodeData();
 		if (!node_data.parameters) {
-			throw `Node '${this.current_node_id_}' has no parameters defined.`;
+			throw `Node '${node_data.name}':'${this.current_node_id_}' has no parameters defined. Searching parameter name ${name}`;
 		}
 		const value = node_data.parameters[name];
 		if (!typeIs(value, parameter_type)) {
-			throw `Parameter '${name}' on node '${this.current_node_id_}' must be a ${parameter_type}.`;
+			throw `Parameter '${name}' on node '${node_data.name}':'${this.current_node_id_}' must be a ${parameter_type}.`;
 		}
 		return value as never;
 	}

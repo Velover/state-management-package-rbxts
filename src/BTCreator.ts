@@ -158,7 +158,7 @@ export class BTCreator {
 		}
 	}
 
-	private GetCreatedNode(id: string): BTree.Node {
+	public GetCreatedNode(id: string): BTree.Node {
 		const node = this.created_nodes_map_.get(id);
 		if (node === undefined) {
 			throw `Node with id '${id}' has not been created yet.`;
@@ -197,7 +197,7 @@ export class BTCreator {
 		return order;
 	}
 
-	private GetNodeData(id: string): INodeData {
+	public GetNodeData(id: string): INodeData {
 		this.AssertLoaded();
 		if (!this.data_!.structure[id]) {
 			throw `Node '${id}' not found in structure`;

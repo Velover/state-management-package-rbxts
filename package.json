@@ -1,6 +1,6 @@
 {
   "name": "@rbxts/state-management",
-  "version": "0.2.11",
+  "version": "0.3.0",
   "main": "out/init.lua",
   "scripts": {
     "build": "rbxtsc --verbose",
@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "@rbxts/compiler-types": "^3.0.0-types.0",
-    "@rbxts/types": "^1.0.884",
+    "@rbxts/types": "^1.0.913",
     "@typescript-eslint/eslint-plugin": "^8.45.0",
     "@typescript-eslint/parser": "^8.45.0",
     "eslint": "^8.57.1",
@@ -40,9 +40,6 @@
     "prettier": "^3.6.2",
     "roblox-ts": "^3.0.0",
     "typescript": "^5.9.3"
-  },
-  "dependencies": {
-    "@rbxts/services": "^1.5.5"
   },
   "repository": {
     "type": "git",

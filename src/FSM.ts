@@ -16,8 +16,13 @@ export namespace FSM {
 		private states_: Map<string, IFSMState> = new Map();
 		private transitions_: Map<string, ITransition[]> = new Map();
 		private event_transitions_: Map<string, Map<string, ITransition[]>> = new Map();
+
 		private any_transitions_: ITransition[] = [];
+		private any_event_transitions_: Map<string, ITransition[]> = new Map();
 		private current_state_: string;
+
+		private scheduled_state_?: string;
+		private is_update_ = false;
 
 		private binding_on_enter_?: (bb: Blackboard) => void;
 		private binding_on_exit_?: (bb: Blackboard) => void;
@@ -45,6 +50,10 @@ export namespace FSM {
 		}
 
 		Start(): void {
+			assert(
+				this.states_.has(this.default_state_),
+				`FSM: default state "${this.default_state_}" was never registered.`,
+			);
 			this.OnEnter();
 		}
 
@@ -52,7 +61,8 @@ export namespace FSM {
 			this.OnExit();
 		}
 
-		public Update(dt: number): void {
+		Update(dt: number): void {
+			this.is_update_ = true;
 			let state_to_set: string | undefined = undefined;
 			const transitions = this.transitions_.get(this.current_state_) ?? [];
 			for (const transition of transitions) {
@@ -76,7 +86,14 @@ export namespace FSM {
 			}
 
 			this.states_.get(this.current_state_)?.Update(dt, this.blackboard_);
+			if (this.scheduled_state_ !== undefined) {
+				this.states_.get(this.current_state_)?.OnExit(this.blackboard_);
+				this.current_state_ = this.scheduled_state_;
+				this.states_.get(this.current_state_)?.OnEnter(this.blackboard_);
+				this.scheduled_state_ = undefined;
+			}
 			this.binding_update_?.(dt, this.blackboard_);
+			this.is_update_ = false;
 		}
 
 		AddTransition(
@@ -122,35 +139,86 @@ export namespace FSM {
 				Condition: condition,
 			};
 
-			const state_transitions =
-				this.event_transitions_.get(from) ??
-				this.event_transitions_.set(from, new Map()).get(from)!; //get or create the map
+			let state_transitions = this.event_transitions_.get(from);
 
-			const transitions =
-				state_transitions.get(event_name) ?? state_transitions.set(event_name, []).get(event_name)!; //get or create the array
+			if (state_transitions === undefined) {
+				state_transitions = new Map<string, ITransition[]>();
+				this.event_transitions_.set(from, state_transitions);
+			}
+
+			let transitions = state_transitions.get(event_name);
+			if (transitions === undefined) {
+				transitions = [];
+				state_transitions.set(event_name, transitions);
+			}
 
 			transitions.push(transition);
 			transitions.sort((a, b) => a.Priority > b.Priority);
 		}
 
+		AddAnyEventTransition(
+			to: string,
+			event_name: string,
+			priority: number,
+			condition?: (bb: Blackboard) => boolean,
+		): void {
+			const transition: ITransition = {
+				To: to,
+				Priority: priority,
+				Condition: condition,
+			};
+
+			let transitions = this.any_event_transitions_.get(event_name);
+
+			if (transitions === undefined) {
+				transitions = [];
+				this.any_event_transitions_.set(event_name, transitions);
+			}
+			transitions.push(transition);
+			transitions.sort((a, b) => a.Priority > b.Priority);
+		}
+
 		HandleEvent(event_name: string): void {
-			const state_transitions = this.event_transitions_.get(this.current_state_);
-			if (state_transitions === undefined) return;
-
-			const transitions = state_transitions.get(event_name);
-			if (transitions === undefined) return;
-
 			let best_transition: ITransition | undefined = undefined;
-			for (const transition of transitions) {
-				if (transition.Condition?.(this.blackboard_) === false) continue;
-				if (best_transition === undefined || transition.Priority > best_transition.Priority) {
+			const state_transitions = this.event_transitions_.get(this.current_state_);
+			const any_transitions = this.any_event_transitions_.get(event_name);
+			if (any_transitions === undefined && state_transitions === undefined) return;
+
+			if (state_transitions !== undefined) {
+				const transitions = state_transitions.get(event_name);
+				if (transitions !== undefined) {
+					for (const transition of transitions) {
+						if (transition.Condition?.(this.blackboard_) === false) continue;
+						//in theory, the transitions should already be sorted by priority, so the first valid one is the best one
+						best_transition = transition;
+						break;
+					}
+				}
+			}
+
+			if (any_transitions !== undefined && best_transition === undefined) {
+				for (const transition of any_transitions) {
+					if (transition.Condition?.(this.blackboard_) === false) continue;
 					best_transition = transition;
+					break;
 				}
 			}
 
 			if (best_transition === undefined) return;
+			this.ForceSetState(best_transition.To);
+		}
+
+		ForceSetState(state: string): void {
+			assert(
+				this.states_.has(state),
+				`FSM: Cannot force set state to ${state} because it does not exist.`,
+			);
+			if (this.is_update_) {
+				this.scheduled_state_ = state;
+				return;
+			}
 			this.states_.get(this.current_state_)?.OnExit(this.blackboard_);
-			this.current_state_ = best_transition.To;
+			this.current_state_ = state;
 			this.states_.get(this.current_state_)?.OnEnter(this.blackboard_);
 		}
 

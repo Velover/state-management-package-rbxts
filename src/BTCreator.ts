@@ -1,6 +1,7 @@
-import { HttpService } from "@rbxts/services";
 import { BTree } from "BehaviorTree";
 import { Blackboard } from "Blackboard";
+
+const HttpService = game.GetService("HttpService");
 
 interface INodeData {
 	name: string;
@@ -520,14 +521,14 @@ export class BTCreator {
 			const child_id = creator.GetCurrentNodeData().children[0];
 			const child_node = creator.GetCreatedNode(child_id);
 			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
-			return new BTree.RetryUntilSuccess(child_node, max_attempts);
+			return new BTree.KeepRunningUntilSuccess(child_node, max_attempts);
 		});
 
 		this.AddNodeCreator("RetryUntilFailure", (creator) => {
 			const child_id = creator.GetCurrentNodeData().children[0];
 			const child_node = creator.GetCreatedNode(child_id);
 			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
-			return new BTree.RetryUntilFailure(child_node, max_attempts);
+			return new BTree.KeepRunningUntilFailure(child_node, max_attempts);
 		});
 
 		this.AddNodeCreator("Repeat", (creator) => {

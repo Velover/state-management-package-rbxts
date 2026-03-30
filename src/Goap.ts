@@ -1,9 +1,9 @@
 //!native
 //!optimize 2
 
+import { BTree } from "BehaviorTree";
 import { FSM } from "FSM";
 import { Blackboard } from "./Blackboard";
-import { BTree } from "BehaviorTree";
 
 function AssertNumber(value: unknown): asserts value is number {
 	if (typeIs(value, "number")) return;
@@ -48,7 +48,7 @@ export namespace Goap {
 			return this as unknown as WorldState<T>;
 		}
 
-		public Size(): number {
+		Size(): number {
 			return this.data_.size();
 		}
 
@@ -63,7 +63,7 @@ export namespace Goap {
 			return total_distance;
 		}
 
-		public Equals(target: WorldState): boolean {
+		Equals(target: WorldState): boolean {
 			const target_data = target.data_;
 			if (target_data.size() !== this.data_.size()) return false;
 
@@ -132,7 +132,7 @@ export namespace Goap {
 			}
 		}
 
-		public GetPriority(world_state: WorldState, agent: Agent): number {
+		GetPriority(world_state: WorldState, agent: Agent): number {
 			return this.priority_func_?.(world_state, agent) ?? this.priority_v_;
 		}
 
@@ -750,13 +750,13 @@ export namespace Goap {
 
 	// Base Action class (your existing code)
 	export abstract class Action {
-		public abstract GetStaticEffects(world_state: WorldState): Map<string, Effect>;
-		public abstract GetStaticRequirements(world_state: WorldState): Map<string, Requirement>;
-		public abstract GetCost(world_state: WorldState): number;
+		abstract GetStaticEffects(world_state: WorldState): Map<string, Effect>;
+		abstract GetStaticRequirements(world_state: WorldState): Map<string, Requirement>;
+		abstract GetCost(world_state: WorldState): number;
 
 		protected state_: EActionState = EActionState.IDLE;
 
-		public Tick(dt_s: number, world_state: WorldState, active_nodes: Set<Action>): EActionStatus {
+		Tick(dt_s: number, world_state: WorldState, active_nodes: Set<Action>): EActionStatus {
 			if (this.state_ === EActionState.IDLE) {
 				this.state_ = EActionState.RUNNING;
 				const startStatus = this.OnStart(world_state);
@@ -791,14 +791,14 @@ export namespace Goap {
 			return EActionStatus.FAILURE;
 		}
 
-		public Halt(): void {
+		Halt(): void {
 			if (this.state_ !== EActionState.RUNNING) return;
 			this.state_ = EActionState.HALTED;
 			this.OnHalt();
 			this.state_ = EActionState.IDLE;
 		}
 
-		public IsRunning(): boolean {
+		IsRunning(): boolean {
 			return this.state_ === EActionState.RUNNING;
 		}
 

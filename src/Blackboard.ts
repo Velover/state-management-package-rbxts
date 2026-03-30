@@ -14,57 +14,54 @@ export class Blackboard<TRecord extends object = object> {
 		}
 	}
 
-	public Cast<T extends object>(): Blackboard<T> {
+	Cast<T extends object>(): Blackboard<T> {
 		return this as unknown as Blackboard<T>;
 	}
 
-	public Set<T extends keyof TRecord>(key: T, value: TRecord[T]): void {
+	Set<T extends keyof TRecord>(key: T, value: TRecord[T]): void {
 		this.data_.set(key as never, value);
 	}
 
-	public SetWild<T>(key: string, value: T): T {
+	SetWild<T>(key: string, value: T): T {
 		this.data_.set(key, value);
 		return value;
 	}
 
-	public UpdateWild<T>(key: string, callback: (v: T | undefined) => T): T {
+	UpdateWild<T>(key: string, callback: (v: T | undefined) => T): T {
 		const current_value = this.data_.get(key) as T | undefined;
 		const new_value = callback(current_value);
 		this.data_.set(key, new_value);
 		return new_value;
 	}
 
-	public Get<T extends keyof TRecord>(key: T): TRecord[T] {
+	Get<T extends keyof TRecord>(key: T): TRecord[T] {
 		return this.data_.get(key as never) as TRecord[T];
 	}
 
-	public Update<T extends keyof TRecord>(
-		key: T,
-		callback: (v: TRecord[T]) => TRecord[T],
-	): TRecord[T] {
+	Update<T extends keyof TRecord>(key: T, callback: (v: TRecord[T]) => TRecord[T]): TRecord[T] {
 		const current_value = this.data_.get(key as never);
 		const new_value = callback(current_value as never);
 		this.data_.set(key as never, new_value);
 		return new_value;
 	}
 
-	public GetWild<T>(key: string): T | undefined {
+	GetWild<T>(key: string): T | undefined {
 		return this.data_.get(key) as T | undefined;
 	}
 
-	public GetWildOrDefault<T>(key: string, default_value: T): T {
+	GetWildOrDefault<T>(key: string, default_value: T): T {
 		return (this.data_.get(key) as T | undefined) ?? default_value;
 	}
 
-	public HasWild(key: string): boolean {
+	HasWild(key: string): boolean {
 		return this.data_.has(key);
 	}
 
-	public DeleteWild(key: string): boolean {
+	DeleteWild(key: string): boolean {
 		return this.data_.delete(key);
 	}
 
-	public GetWildOfType<T>(key: string, v_type: T): T | undefined {
+	GetWildOfType<T>(key: string, v_type: T): T | undefined {
 		const value = this.data_.get(key);
 		if (value === undefined) return undefined;
 		if (typeOf(value) !== typeOf(v_type)) {
@@ -74,7 +71,7 @@ export class Blackboard<TRecord extends object = object> {
 		return value as T;
 	}
 
-	public GetOrDefaultWildOfType<T>(key: string, v_type: T, default_value: T): T {
+	GetOrDefaultWildOfType<T>(key: string, v_type: T, default_value: T): T {
 		const value = this.data_.get(key);
 		if (value === undefined) return default_value;
 		if (typeOf(value) !== typeOf(v_type)) {

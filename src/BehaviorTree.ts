@@ -1107,7 +1107,7 @@ export namespace BTree {
 		OnSuccess?: (bb: Blackboard) => void;
 		OnFailure?: (bb: Blackboard) => void;
 		OnHalt?: (bb: Blackboard) => void;
-		OnFinish?: (status: ENodeStatus, bb: Blackboard) => void;
+		OnExit?: (status: ENodeStatus, bb: Blackboard) => void;
 	}
 
 	/** faster way of creating a node with all callbacks */
@@ -1142,7 +1142,7 @@ export namespace BTree {
 		}
 
 		protected override OnExit(status: ENodeStatus, bb: Blackboard): void {
-			this.config_.OnFinish?.(status, bb);
+			this.config_.OnExit?.(status, bb);
 		}
 
 		override OnBecameInactive(bb: Blackboard): void {

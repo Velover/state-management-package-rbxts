@@ -918,6 +918,50 @@ export namespace BTree {
 		}
 	}
 
+	/** WasEntryUpdated - checks if specified blackboard entries have changed since last tick */
+	export class WasEntryUpdated extends Node {
+		private snapshot_: defined[] = [];
+		constructor(
+			private readonly entries_: string[],
+			private readonly skip_first_ = false,
+		) {
+			super();
+		}
+		override OnBecameActivated(bb: Blackboard): void {
+			if (!this.skip_first_) return;
+			for (const key of this.entries_) {
+				this.snapshot_.push(bb.GetWild(key)!);
+			}
+		}
+
+		protected override OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			const new_snapshot: defined[] = [];
+			for (const key of this.entries_) {
+				new_snapshot.push(bb.GetWild(key)!);
+			}
+			let changed = this.snapshot_.size() !== new_snapshot.size();
+			if (!changed) {
+				for (let i = 0; i < this.snapshot_.size(); i++) {
+					if (this.snapshot_[i] === new_snapshot[i]) continue;
+					changed = true;
+					break;
+				}
+			}
+			this.snapshot_ = new_snapshot;
+			return changed ? ENodeStatus.SUCCESS : ENodeStatus.FAILURE;
+		}
+
+		override OnBecameInactive(bb: Blackboard): void {
+			this.snapshot_.clear();
+		}
+	}
+
 	/** Condition node - checks a condition */
 	export class Condition extends Node {
 		constructor(private readonly condition_: (bb: Blackboard, dt: number) => boolean) {

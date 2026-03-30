@@ -262,6 +262,15 @@ Like `Wait` but returns `FAILURE` until the duration elapses, then `SUCCESS`. Do
 new BTree.WaitGate(1.0);
 ```
 
+### WasEntryUpdated
+
+Returns `SUCCESS` if any of the specified blackboard keys have changed since the last tick, otherwise `FAILURE`. Pass `true` for `skipFirst` to snapshot the current values on activation so the first tick only reports genuine changes.
+
+```typescript
+new BTree.WasEntryUpdated(["targetPosition", "alertLevel"]); // react to any change
+new BTree.WasEntryUpdated(["targetPosition"], true); // skip the first-tick diff
+```
+
 ### Timer
 
 Reads a blackboard key as a countdown timer. Returns `SUCCESS` when the value reaches zero or below.

@@ -856,7 +856,7 @@ export namespace BTree {
 				this.current_attempts_++;
 
 				const run_out_of_attempts =
-					this.max_attempts_ >= 0 && this.current_attempts_ >= this.max_attempts_;
+					this.max_attempts_ > 0 && this.current_attempts_ >= this.max_attempts_;
 
 				if (run_out_of_attempts) return ENodeStatus.FAILURE;
 			}
@@ -893,8 +893,8 @@ export namespace BTree {
 
 			if (status === ENodeStatus.SUCCESS) {
 				this.current_attempts_++;
-				if (this.max_attempts_ >= 0 && this.current_attempts_ >= this.max_attempts_) {
-					return ENodeStatus.FAILURE;
+				if (this.max_attempts_ > 0 && this.current_attempts_ >= this.max_attempts_) {
+					return ENodeStatus.SUCCESS;
 				}
 			}
 

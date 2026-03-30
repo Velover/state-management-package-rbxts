@@ -281,7 +281,7 @@ new BTree.FullAction({
 	OnHalt: (bb) => {},
 	OnSuccess: (bb) => {},
 	OnFailure: (bb) => {},
-	OnFinish: (status, bb) => {},
+	OnExit: (status, bb) => {},
 	OnActivated: (bb) => {},
 	OnDeactivated: (bb) => {},
 });

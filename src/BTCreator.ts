@@ -136,11 +136,10 @@ export class BTCreator {
 
 	private current_node_id_?: string;
 	private current_blackboard_?: Blackboard;
-	constructor() {
-		this.FilloutDefaultCreators();
-	}
+	private nodes_loaded_ = false;
+	constructor() {}
 
-	/**@asserts validity */
+	/**@asserts validity, loads node creators based on version */
 	LoadData(json_data: string): void {
 		const data = HttpService.JSONDecode(json_data);
 
@@ -151,6 +150,17 @@ export class BTCreator {
 			throw `Invalid file structure: ${error}`;
 		}
 		this.data_ = data;
+
+		if (!this.nodes_loaded_) {
+			this.LoadDefaultNodes();
+			const version = data.version;
+			if (version === "2.0.0") {
+				this.LoadV2Nodes();
+			} else if (version === "1.0.0") {
+				this.LoadV1Nodes();
+			}
+			this.nodes_loaded_ = true;
+		}
 	}
 
 	private AssertLoaded() {
@@ -352,7 +362,8 @@ export class BTCreator {
 		return value as never;
 	}
 
-	private FilloutDefaultCreators() {
+	/** Loads all default node creators shared across versions */
+	public LoadDefaultNodes() {
 		this.AddNodeCreator("Sequence", (creator) => {
 			const children = creator.GetCurrentNodeData().children;
 			const sequence = new BTree.Sequence();
@@ -517,20 +528,6 @@ export class BTCreator {
 			return new BTree.Timeout(child_node, timeout_seconds, timeout_behavior);
 		});
 
-		this.AddNodeCreator("RetryUntilSuccess", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
-			return new BTree.KeepRunningUntilSuccess(child_node, max_attempts);
-		});
-
-		this.AddNodeCreator("RetryUntilFailure", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
-			return new BTree.KeepRunningUntilFailure(child_node, max_attempts);
-		});
-
 		this.AddNodeCreator("Repeat", (creator) => {
 			const child_id = creator.GetCurrentNodeData().children[0];
 			const child_node = creator.GetCreatedNode(child_id);
@@ -576,6 +573,58 @@ export class BTCreator {
 			const callback_name = creator.GetCurrentNodeParameter("callbackName", "string");
 			const callback = creator.GetCallback(callback_name);
 			return new BTree.Callback(callback);
+		});
+	}
+
+	/** Loads v1 node creators (default set only) */
+	public LoadV1Nodes() {
+		this.LoadDefaultNodes();
+		this.AddNodeCreator("RetryUntilSuccess", (creator) => {
+			const child_id = creator.GetCurrentNodeData().children[0];
+			const child_node = creator.GetCreatedNode(child_id);
+			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
+			return new BTree.KeepRunningUntilSuccess(child_node, max_attempts);
+		});
+
+		this.AddNodeCreator("RetryUntilFailure", (creator) => {
+			const child_id = creator.GetCurrentNodeData().children[0];
+			const child_node = creator.GetCreatedNode(child_id);
+			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
+			return new BTree.KeepRunningUntilFailure(child_node, max_attempts);
+		});
+	}
+
+	/** Loads v2 node creators (adds v2 nodes on top of default) */
+	public LoadV2Nodes() {
+		this.AddNodeCreator("KeepRunningUntilSuccess", (creator) => {
+			const child_id = creator.GetCurrentNodeData().children[0];
+			const child_node = creator.GetCreatedNode(child_id);
+			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
+			return new BTree.KeepRunningUntilSuccess(child_node, max_attempts);
+		});
+
+		this.AddNodeCreator("KeepRunningUntilFailure", (creator) => {
+			const child_id = creator.GetCurrentNodeData().children[0];
+			const child_node = creator.GetCreatedNode(child_id);
+			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
+			return new BTree.KeepRunningUntilFailure(child_node, max_attempts);
+		});
+
+		this.AddNodeCreator("TryCatch", (creator) => {
+			const node_data = creator.GetCurrentNodeData();
+			const try_catch = new BTree.TryCatch();
+			for (const child_id of node_data.children) {
+				const child_node = creator.GetCreatedNode(child_id);
+				try_catch.AddChild(child_node);
+			}
+			return try_catch;
+		});
+
+		this.AddNodeCreator("WasEntryUpdated", (creator) => {
+			const entries_raw = creator.GetCurrentNodeParameter("entries", "string");
+			const entries = entries_raw.split(",") as unknown as string[];
+			const skip_first = creator.GetCurrentNodeParameter("skipFirst", "string") === "TRUE";
+			return new BTree.WasEntryUpdated(entries, skip_first);
 		});
 	}
 }

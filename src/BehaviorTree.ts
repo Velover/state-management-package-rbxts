@@ -1363,6 +1363,12 @@ export namespace BTree {
 
 		Halt(): void {
 			this.root_.Halt(this.blackboard_);
+			for (const node of this.running_nodes_) {
+				node.Halt(this.blackboard_);
+			}
+			for (const node of this.active_nodes_) {
+				node.OnBecameInactive(this.blackboard_);
+			}
 			this.running_nodes_.clear();
 			this.active_nodes_.clear();
 		}

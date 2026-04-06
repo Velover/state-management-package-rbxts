@@ -576,7 +576,7 @@ export class BTCreator {
 		});
 
 		this.AddNodeCreator("Plug", (creator) => {
-			const status = creator.GetCurrentNodeParameter("Status", "string");
+			const status = creator.GetCurrentNodeParameter("status", "string");
 			let final_status: BTree.ENodeStatus;
 			if (status === "RUNNING") {
 				final_status = BTree.ENodeStatus.RUNNING;

@@ -215,6 +215,15 @@ new BTree.KeepRunningUntilSuccess(unreliableAction, 5); // max 5 attempts
 new BTree.KeepRunningUntilFailure(monitorAction, -1); // unlimited
 ```
 
+### OneShot
+
+Executes the child once and caches the result. Returns the same `SUCCESS` or `FAILURE` on every subsequent tick without re-running the child. Pass `true` for `resetOnBecomeInactive` to clear the cached result when the node leaves the active set, allowing the child to run again next time.
+
+```typescript
+new BTree.OneShot(expensiveAction); // run once, remember result forever
+new BTree.OneShot(expensiveAction, true); // reset when node becomes inactive
+```
+
 ## Leaf Nodes
 
 ### Action
@@ -294,6 +303,16 @@ new BTree.FullAction({
 	OnActivated: (bb) => {},
 	OnDeactivated: (bb) => {},
 });
+```
+
+### Plug
+
+Always returns a fixed status. Useful for testing or stubbing out branches.
+
+```typescript
+new BTree.Plug(BTree.ENodeStatus.SUCCESS); // always succeeds (default)
+new BTree.Plug(BTree.ENodeStatus.FAILURE); // always fails
+new BTree.Plug(BTree.ENodeStatus.RUNNING); // always running
 ```
 
 ## Node Lifecycle

@@ -1138,8 +1138,8 @@ export namespace BTree {
 	}
 
 	interface IFullActionConfig {
-		OnActivated?: (bb: Blackboard) => void;
-		OnDeactivated?: (bb: Blackboard) => void;
+		OnBecameActivated?: (bb: Blackboard) => void;
+		OnBecameInactive?: (bb: Blackboard) => void;
 		OnStart?: (bb: Blackboard) => ENodeStatus | undefined | void;
 		OnTick?: (
 			dt: number,
@@ -1161,7 +1161,7 @@ export namespace BTree {
 		}
 
 		override OnBecameActivated(bb: Blackboard): void {
-			this.config_.OnActivated?.(bb);
+			this.config_.OnBecameActivated?.(bb);
 		}
 
 		protected override OnStart(bb: Blackboard): ENodeStatus {
@@ -1190,7 +1190,7 @@ export namespace BTree {
 		}
 
 		override OnBecameInactive(bb: Blackboard): void {
-			this.config_.OnDeactivated?.(bb);
+			this.config_.OnBecameInactive?.(bb);
 		}
 
 		protected override OnSuccess(bb: Blackboard): void {
@@ -1319,6 +1319,53 @@ export namespace BTree {
 		): ENodeStatus {
 			this.callback_(bb, dt);
 			return ENodeStatus.SUCCESS;
+		}
+	}
+
+	/** Plug - a node that always returns a specified status (useful for testing) */
+	export class Plug extends Node {
+		constructor(private readonly status_: ENodeStatus = ENodeStatus.SUCCESS) {
+			super();
+		}
+
+		protected override OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			return this.status_;
+		}
+	}
+
+	/** OneShot - executes child once and returns same result on subsequent ticks */
+	export class OneShot extends Decorator {
+		private res_?: ENodeStatus;
+		constructor(
+			child: Node,
+			private readonly reset_on_become_inactive_ = false,
+		) {
+			super(child);
+		}
+		protected override OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			if (this.res_ === undefined) {
+				const res = this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
+				if (res === ENodeStatus.RUNNING) return ENodeStatus.RUNNING;
+				this.res_ = res;
+			}
+			return this.res_;
+		}
+
+		override OnBecameInactive(bb: Blackboard): void {
+			if (!this.reset_on_become_inactive_) return;
+			this.res_ = undefined;
 		}
 	}
 

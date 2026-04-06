@@ -574,6 +574,28 @@ export class BTCreator {
 			const callback = creator.GetCallback(callback_name);
 			return new BTree.Callback(callback);
 		});
+
+		this.AddNodeCreator("Plug", (creator) => {
+			const status = creator.GetCurrentNodeParameter("Status", "string");
+			let final_status: BTree.ENodeStatus;
+			if (status === "RUNNING") {
+				final_status = BTree.ENodeStatus.RUNNING;
+			} else if (status === "FAILURE") {
+				final_status = BTree.ENodeStatus.FAILURE;
+			} else {
+				final_status = BTree.ENodeStatus.SUCCESS;
+			}
+
+			return new BTree.Plug(final_status);
+		});
+
+		this.AddNodeCreator("OneShot", (creator) => {
+			const child_id = creator.GetCurrentNodeData().children[0];
+			const child_node = creator.GetCreatedNode(child_id);
+			const reset_on_become_inactive =
+				creator.GetCurrentNodeParameter("resetOnBecomeInactive", "string") === "TRUE";
+			return new BTree.OneShot(child_node, reset_on_become_inactive);
+		});
 	}
 
 	/** Loads v1 node creators (default set only) */

@@ -1,6 +1,6 @@
 {
 	"name": "@rbxts/state-management",
-	"version": "0.3.5",
+	"version": "0.3.6",
 	"main": "out/init.lua",
 	"scripts": {
 		"build": "rbxtsc --verbose",
@@ -30,7 +30,7 @@
 	},
 	"devDependencies": {
 		"@rbxts/compiler-types": "^3.0.0-types.0",
-		"@rbxts/types": "^1.0.913",
+		"@rbxts/types": "^1.0.914",
 		"@typescript-eslint/eslint-plugin": "^8.45.0",
 		"@typescript-eslint/parser": "^8.45.0",
 		"eslint": "^8.57.1",

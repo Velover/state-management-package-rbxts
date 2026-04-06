@@ -133,6 +133,8 @@ Inside a creator callback, use the `BTCreator` argument to inspect the current n
 | `Repeat`            | `repeatCount` (number), `repeatCondition` (`ALWAYS`/`SUCCESS`/`FAILURE`) | Repeats child N times                            |
 | `RetryUntilSuccess` | `maxAttempts` (number)                                                   | Retries child until it succeeds                  |
 | `RetryUntilFailure` | `maxAttempts` (number)                                                   | Retries child until it fails                     |
+| `OneShot`           | `resetOnBecomeInactive` (`TRUE`/`FALSE`)                                 | Runs child once, caches result on repeat ticks   |
+| `Plug`              | `Status` (`SUCCESS`/`FAILURE`/`RUNNING`)                                 | Always returns a fixed status                    |
 | `Action`            | `actionName` (string)                                                    | Calls a registered action                        |
 | `Condition`         | `conditionName` (string)                                                 | Calls a registered condition                     |
 | `Callback`          | `callbackName` (string)                                                  | Calls a registered callback                      |

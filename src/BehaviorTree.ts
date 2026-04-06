@@ -1373,6 +1373,8 @@ export namespace BTree {
 	export class BehaviorTree {
 		private running_nodes_: Set<Node> = new Set();
 		private active_nodes_: Set<Node> = new Set();
+		private is_running_ = false;
+		private scheduling_halt_ = false;
 
 		constructor(
 			private root_: Node,
@@ -1380,6 +1382,7 @@ export namespace BTree {
 		) {}
 
 		Tick(dt: number): ENodeStatus {
+			this.is_running_ = true;
 			const new_running_nodes = new Set<Node>();
 			const new_active_nodes = new Set<Node>();
 			const status = this.root_.Tick(
@@ -1405,10 +1408,20 @@ export namespace BTree {
 
 			this.running_nodes_ = new_running_nodes;
 			this.active_nodes_ = new_active_nodes;
+			this.is_running_ = false;
+			if (this.scheduling_halt_) {
+				this.scheduling_halt_ = false;
+				this.Halt();
+			}
 			return status;
 		}
 
 		Halt(): void {
+			if (this.is_running_) {
+				this.scheduling_halt_ = true;
+				return;
+			}
+
 			this.root_.Halt(this.blackboard_);
 			for (const node of this.running_nodes_) {
 				node.Halt(this.blackboard_);

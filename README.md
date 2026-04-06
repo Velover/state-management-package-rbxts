@@ -35,6 +35,18 @@ docs/
 import { BTree, FSM, Goap, Blackboard, BTCreator } from "@rbxts/state-management";
 ```
 
+## Changelog
+
+| Version                                                                              | Highlights                                                                                  |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| [0.3.6](docs/Changelog/0-3-6.md#036--new-nodes-plug-and-oneshot)                     | New `Plug` and `OneShot` BehaviorTree nodes; BTCreator versioned schema support             |
+| [0.3.5](docs/Changelog/0-3-6.md#035--bug-fix-behaviortreehalt-incomplete-teardown)   | Fixed `BehaviorTree.Halt()` not cleaning up all running/active nodes                        |
+| [0.3.4](docs/Changelog/0-3-6.md#034--btcreator-versioned-schemas)                    | BTCreator versioned node loading (`1.0.0` / `2.0.0` schemas)                                |
+| [0.3.3](docs/Changelog/0-3-6.md#033--new-node-wasentryupdated)                       | New `WasEntryUpdated` node — blackboard change detection                                    |
+| [0.3.2](docs/Changelog/0-3-6.md#032--fullaction--ifullactionconfig-naming-alignment) | `IFullActionConfig` key renames to match lifecycle API                                      |
+| [0.3.1](docs/Changelog/0-3-6.md#031--bug-fix-max-attempts-semantics)                 | Fixed `KeepRunningUntilSuccess/Failure` max attempts logic                                  |
+| [0.3.0](docs/Changelog/0-3-0.md)                                                     | BehaviorTree lifecycle refactor; FSM `ForceSetState` & any-event transitions; separate docs |
+
 ## License
 
 MIT

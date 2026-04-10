@@ -66,6 +66,7 @@ export namespace FSM {
 			let state_to_set: string | undefined = undefined;
 			const transitions = this.transitions_.get(this.current_state_) ?? [];
 			for (const transition of transitions) {
+				if (transition.To === this.current_state_) continue;
 				if (transition.Condition?.(this.blackboard_) === false) continue;
 				state_to_set = transition.To;
 				break;
@@ -73,6 +74,7 @@ export namespace FSM {
 
 			if (state_to_set === undefined) {
 				for (const transition of this.any_transitions_) {
+					if (transition.To === this.current_state_) continue;
 					if (transition.Condition?.(this.blackboard_) === false) continue;
 					state_to_set = transition.To;
 					break;
@@ -188,6 +190,7 @@ export namespace FSM {
 				const transitions = state_transitions.get(event_name);
 				if (transitions !== undefined) {
 					for (const transition of transitions) {
+						if (transition.To === this.current_state_) continue;
 						if (transition.Condition?.(this.blackboard_) === false) continue;
 						//in theory, the transitions should already be sorted by priority, so the first valid one is the best one
 						best_transition = transition;
@@ -198,6 +201,7 @@ export namespace FSM {
 
 			if (any_transitions !== undefined && best_transition === undefined) {
 				for (const transition of any_transitions) {
+					if (transition.To === this.current_state_) continue;
 					if (transition.Condition?.(this.blackboard_) === false) continue;
 					best_transition = transition;
 					break;
@@ -208,11 +212,12 @@ export namespace FSM {
 			this.ForceSetState(best_transition.To);
 		}
 
-		ForceSetState(state: string): void {
+		ForceSetState(state: string, skip_if_same: boolean = true): void {
 			assert(
 				this.states_.has(state),
 				`FSM: Cannot force set state to ${state} because it does not exist.`,
 			);
+			if (skip_if_same && state === this.current_state_) return;
 			if (this.is_update_) {
 				this.scheduled_state_ = state;
 				return;
@@ -220,6 +225,10 @@ export namespace FSM {
 			this.states_.get(this.current_state_)?.OnExit(this.blackboard_);
 			this.current_state_ = state;
 			this.states_.get(this.current_state_)?.OnEnter(this.blackboard_);
+		}
+
+		GetCurrentState(): string {
+			return this.current_state_;
 		}
 
 		BindOnEnter(callback: (bb: Blackboard) => void) {

@@ -473,6 +473,36 @@ export namespace BTree {
 		}
 	}
 
+	export class Log extends Node {
+		constructor(private readonly message_: string) {
+			super();
+		}
+		protected override OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			print(this.message_);
+			return ENodeStatus.SUCCESS;
+		}
+	}
+
+	/** ForceRunning - always returns RUNNING*/
+	export class ForceRunning extends Decorator {
+		protected OnTick(
+			dt: number,
+			bb: Blackboard,
+			running_nodes: Set<Node>,
+			new_active_nodes: Set<Node>,
+			old_active_nodes: Set<Node>,
+		): ENodeStatus {
+			this.child_.Tick(dt, bb, running_nodes, new_active_nodes, old_active_nodes);
+			return ENodeStatus.RUNNING;
+		}
+	}
+
 	/** ForceSuccess - always returns SUCCESS unless child is RUNNING */
 	export class ForceSuccess extends Decorator {
 		protected OnTick(

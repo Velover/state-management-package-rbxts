@@ -146,8 +146,8 @@ export class BTCreator {
 		try {
 			const is_valid = ValidateSchema(data);
 			if (!is_valid) return;
-		} catch (error) {
-			throw `Invalid file structure: ${error}`;
+		} catch (err) {
+			throw `Invalid file structure: ${err}`;
 		}
 		this.data_ = data;
 
@@ -647,6 +647,15 @@ export class BTCreator {
 			const entries = entries_raw.split(",") as unknown as string[];
 			const skip_first = creator.GetCurrentNodeParameter("skipFirst", "string") === "TRUE";
 			return new BTree.WasEntryUpdated(entries, skip_first);
+		});
+		this.AddNodeCreator("Log", (creator) => {
+			const message = creator.GetCurrentNodeParameter("message", "string");
+			return new BTree.Log(message);
+		});
+		this.AddNodeCreator("ForceRunning", (creator) => {
+			const child_id = creator.GetCurrentNodeData().children[0];
+			const child_node = creator.GetCreatedNode(child_id);
+			return new BTree.ForceRunning(child_node);
 		});
 	}
 }

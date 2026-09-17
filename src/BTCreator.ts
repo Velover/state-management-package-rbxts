@@ -1,5 +1,4 @@
-import { BTree } from "BehaviorTree";
-import { Blackboard } from "Blackboard";
+import { BTree } from "./BehaviorTree";
 
 const HttpService = game.GetService("HttpService");
 
@@ -121,23 +120,37 @@ function ValidateSchema(data: unknown): data is IFileStructure {
 	return true;
 }
 
+type Slot = BTree.Slot;
+type ActionFn = (slot: Slot, dt: number, tree: BTree.BehaviorTree) => BTree.ENodeStatus;
+type ConditionFn = (slot: Slot, dt: number, tree: BTree.BehaviorTree) => boolean;
+type CallbackFn = (slot: Slot, dt: number, tree: BTree.BehaviorTree) => void;
+type SwitchSelector = (slot: Slot, tree: BTree.BehaviorTree) => string | undefined;
+
+/**
+ * Builds a shared `BTree.BehaviorTree` from a JSON description. Register named actions, conditions,
+ * callbacks, fields and sub-trees, then call `Build()`. The nodes are created once; agents are added to
+ * the returned tree with `AddAgent`.
+ */
 export class BTCreator {
 	private node_creators_ = new Map<string, (creator: BTCreator) => BTree.Node>();
 	private data_?: IFileStructure;
 	private created_nodes_map_ = new Map<string, BTree.Node>();
 
-	private actions_registry_map_ = new Map<
-		string,
-		(bb: Blackboard, dt: number) => BTree.ENodeStatus
-	>();
-	private condition_registry_map_ = new Map<string, (bb: Blackboard, dt: number) => boolean>();
-	private callback_registry_map_ = new Map<string, (bb: Blackboard, dt: number) => void>();
-	private sub_tree_registry_map_ = new Map<string, (bb: Blackboard) => BTree.BehaviorTree>();
+	private actions_registry_map_ = new Map<string, ActionFn>();
+	private condition_registry_map_ = new Map<string, ConditionFn>();
+	private callback_registry_map_ = new Map<string, CallbackFn>();
+	private sub_tree_registry_map_ = new Map<string, () => BTree.Node>();
+	private field_registry_map_ = new Map<string, Map<Slot, unknown>>();
+	private selector_registry_map_ = new Map<string, SwitchSelector>();
 
 	private current_node_id_?: string;
-	private current_blackboard_?: Blackboard;
 	private nodes_loaded_ = false;
-	constructor() {}
+	private readonly tree_options_?: { external_ids?: boolean };
+
+	/** @param tree_options passed to every `BehaviorTree` this creator builds, e.g. `{ external_ids: true }`. */
+	constructor(tree_options?: { external_ids?: boolean }) {
+		this.tree_options_ = tree_options;
+	}
 
 	/**@asserts validity, loads node creators based on version */
 	LoadData(json_data: string): void {
@@ -165,7 +178,7 @@ export class BTCreator {
 
 	private AssertLoaded() {
 		if (this.data_ === undefined) {
-			throw "BTree file not loaded. Call LoadFile() first.";
+			throw "BTree file not loaded. Call LoadData() first.";
 		}
 	}
 
@@ -190,10 +203,7 @@ export class BTCreator {
 				Analyze(child, order);
 			}
 			if (node_data.switch_case) {
-				for (const [case_name, case_id] of node_data.switch_case.cases as unknown as Map<
-					string,
-					string
-				>) {
+				for (const [, case_id] of node_data.switch_case.cases as unknown as Map<string, string>) {
 					Analyze(case_id, order);
 				}
 				if (node_data.switch_case.default) {
@@ -231,14 +241,13 @@ export class BTCreator {
 		return creator;
 	}
 
-	Build(bb: Blackboard) {
+	/** Builds the root node only, for embedding this file's tree inside another (see RegisterSubTree). */
+	BuildRoot(): BTree.Node {
 		this.AssertLoaded();
 		const order = this.AnalyzeStructure(this.data_!);
-
 		order.pop(); // Remove the EntryPoint node from the order
 
 		for (const id of order) {
-			this.current_blackboard_ = bb;
 			this.current_node_id_ = id;
 			const node_data = this.GetNodeData(id);
 			const creator = this.GetNodeCreator(node_data.name);
@@ -249,9 +258,15 @@ export class BTCreator {
 		const last_node_id = order[order.size() - 1];
 		const last_node = this.GetCreatedNode(last_node_id);
 		this.created_nodes_map_.clear();
-		this.current_blackboard_ = undefined; // Reset current blackboard after building
-		this.current_node_id_ = undefined; // Reset current node id after building
-		return new BTree.BehaviorTree(last_node, bb);
+		this.current_node_id_ = undefined;
+		return last_node;
+	}
+
+	/** Builds the tree. Every registered field is registered on it, so removing an agent clears them. */
+	Build(): BTree.BehaviorTree {
+		const tree = new BTree.BehaviorTree(this.BuildRoot(), this.tree_options_);
+		for (const [, field] of this.field_registry_map_) tree.RegisterField(field);
+		return tree;
 	}
 
 	public GetCurrentNodeId(): string {
@@ -268,54 +283,65 @@ export class BTCreator {
 		return this.GetNodeData(this.current_node_id_);
 	}
 
-	public GetCurrentBlackboard(): Blackboard {
-		if (this.current_blackboard_ === undefined) {
-			throw "Cannot use current blackboard outside of building process.";
-		}
-		return this.current_blackboard_;
-	}
-
-	public RegisterAction(
-		action_name: string,
-		action: (bb: Blackboard, dt: number) => BTree.ENodeStatus,
-	): void {
+	public RegisterAction(action_name: string, action: ActionFn): void {
 		if (this.actions_registry_map_.has(action_name)) {
 			throw `Action '${action_name}' already registered.`;
 		}
 		this.actions_registry_map_.set(action_name, action);
 	}
 
-	public RegisterCondition(
-		condition_name: string,
-		condition: (bb: Blackboard, dt: number) => boolean,
-	): void {
+	public RegisterCondition(condition_name: string, condition: ConditionFn): void {
 		if (this.condition_registry_map_.has(condition_name)) {
 			throw `Condition '${condition_name}' already registered.`;
 		}
 		this.condition_registry_map_.set(condition_name, condition);
 	}
 
-	public RegisterSubTree(
-		sub_tree_name: string,
-		sub_tree: (bb: Blackboard) => BTree.BehaviorTree,
-	): void {
+	/** Registers a factory producing the root node of a sub-tree. It is called once per `SubTree` node. */
+	public RegisterSubTree(sub_tree_name: string, sub_tree: () => BTree.Node): void {
 		if (this.sub_tree_registry_map_.has(sub_tree_name)) {
 			throw `SubTree '${sub_tree_name}' already registered.`;
 		}
 		this.sub_tree_registry_map_.set(sub_tree_name, sub_tree);
 	}
 
-	public RegisterCallback(
-		callback_name: string,
-		callback: (bb: Blackboard, dt: number) => void,
-	): void {
+	public RegisterCallback(callback_name: string, callback: CallbackFn): void {
 		if (this.callback_registry_map_.has(callback_name)) {
 			throw `Callback '${callback_name}' already registered.`;
 		}
 		this.callback_registry_map_.set(callback_name, callback);
 	}
 
-	private GetCallback(callback_name: string): (bb: Blackboard, dt: number) => void {
+	/**
+	 * Registers a per-agent field by name so `Timer`, `WasEntryUpdated` and `Switch` nodes can refer to it,
+	 * and so the built tree clears it when an agent is removed. Returns the map for your own use.
+	 */
+	public RegisterField<T>(field_name: string, field?: Map<Slot, T>): Map<Slot, T> {
+		if (this.field_registry_map_.has(field_name)) {
+			throw `Field '${field_name}' already registered.`;
+		}
+		const map = field ?? new Map<Slot, T>();
+		this.field_registry_map_.set(field_name, map as Map<Slot, unknown>);
+		return map;
+	}
+
+	/** Registers a named selector for `Switch` nodes whose `parameter_name` is not a registered field. */
+	public RegisterSelector(selector_name: string, selector: SwitchSelector): void {
+		if (this.selector_registry_map_.has(selector_name)) {
+			throw `Selector '${selector_name}' already registered.`;
+		}
+		this.selector_registry_map_.set(selector_name, selector);
+	}
+
+	public GetField<T = unknown>(field_name: string): Map<Slot, T> {
+		const field = this.field_registry_map_.get(field_name);
+		if (field === undefined) {
+			throw `Field '${field_name}' not found.`;
+		}
+		return field as Map<Slot, T>;
+	}
+
+	private GetCallback(callback_name: string): CallbackFn {
 		const callback = this.callback_registry_map_.get(callback_name);
 		if (callback === undefined) {
 			throw `Callback '${callback_name}' not found.`;
@@ -323,7 +349,7 @@ export class BTCreator {
 		return callback;
 	}
 
-	private GetAction(action_name: string): (bb: Blackboard, dt: number) => BTree.ENodeStatus {
+	private GetAction(action_name: string): ActionFn {
 		const action = this.actions_registry_map_.get(action_name);
 		if (action === undefined) {
 			throw `Action '${action_name}' not found.`;
@@ -331,7 +357,7 @@ export class BTCreator {
 		return action;
 	}
 
-	private GetCondition(condition_name: string): (bb: Blackboard, dt: number) => boolean {
+	private GetCondition(condition_name: string): ConditionFn {
 		const condition = this.condition_registry_map_.get(condition_name);
 		if (condition === undefined) {
 			throw `Condition '${condition_name}' not found.`;
@@ -339,12 +365,20 @@ export class BTCreator {
 		return condition;
 	}
 
-	private GetSubTree(sub_tree_name: string): (bb: Blackboard) => BTree.BehaviorTree {
+	private GetSubTree(sub_tree_name: string): () => BTree.Node {
 		const sub_tree = this.sub_tree_registry_map_.get(sub_tree_name);
 		if (sub_tree === undefined) {
 			throw `SubTree '${sub_tree_name}' not found.`;
 		}
 		return sub_tree;
+	}
+
+	private GetSelector(name: string): SwitchSelector {
+		const selector = this.selector_registry_map_.get(name);
+		if (selector !== undefined) return selector;
+		const field = this.field_registry_map_.get(name);
+		if (field !== undefined) return (slot) => field.get(slot) as string | undefined;
+		throw `Switch parameter '${name}' is neither a registered selector nor a registered field.`;
 	}
 
 	public GetCurrentNodeParameter<T extends "string" | "number">(
@@ -362,221 +396,135 @@ export class BTCreator {
 		return value as never;
 	}
 
+	/** Optional string parameter of the current node, or undefined when absent. */
+	public GetCurrentNodeOptionalString(name: string): string | undefined {
+		const value = this.GetCurrentNodeData().parameters?.[name];
+		return typeIs(value, "string") && value !== "" ? value : undefined;
+	}
+
+	/** The already-built children of the current node, in order. */
+	public GetCurrentChildren(): BTree.Node[] {
+		const children = this.GetCurrentNodeData().children;
+		const nodes = new Array<BTree.Node>(children.size());
+		for (let i = 0; i < children.size(); i++) nodes[i] = this.GetCreatedNode(children[i]);
+		return nodes;
+	}
+
+	/** The already-built first child of the current node (decorators). */
+	public GetCurrentChild(): BTree.Node {
+		return this.GetCreatedNode(this.GetCurrentNodeData().children[0]);
+	}
+
 	/** Loads all default node creators shared across versions */
 	public LoadDefaultNodes() {
-		this.AddNodeCreator("Sequence", (creator) => {
-			const children = creator.GetCurrentNodeData().children;
-			const sequence = new BTree.Sequence();
-			for (const child_id of children) {
-				const child_node = creator.GetCreatedNode(child_id);
-				sequence.AddChild(child_node);
-			}
-			return sequence;
-		});
+		this.AddNodeCreator("Sequence", (c) => BTree.Sequence(...c.GetCurrentChildren()));
+		this.AddNodeCreator("ReactiveSequence", (c) =>
+			BTree.ReactiveSequence(...c.GetCurrentChildren()),
+		);
+		this.AddNodeCreator("MemorySequence", (c) => BTree.MemorySequence(...c.GetCurrentChildren()));
+		this.AddNodeCreator("Fallback", (c) => BTree.Fallback(...c.GetCurrentChildren()));
+		this.AddNodeCreator("ReactiveFallback", (c) =>
+			BTree.ReactiveFallback(...c.GetCurrentChildren()),
+		);
 
-		this.AddNodeCreator("ReactiveSequence", (creator) => {
-			const children = creator.GetCurrentNodeData().children;
-			const sequence = new BTree.ReactiveSequence();
-			for (const child_id of children) {
-				const child_node = creator.GetCreatedNode(child_id);
-				sequence.AddChild(child_node);
-			}
-			return sequence;
-		});
-
-		this.AddNodeCreator("MemorySequence", (creator) => {
-			const children = creator.GetCurrentNodeData().children;
-			const sequence = new BTree.MemorySequence();
-			for (const child_id of children) {
-				const child_node = creator.GetCreatedNode(child_id);
-				sequence.AddChild(child_node);
-			}
-			return sequence;
-		});
-
-		this.AddNodeCreator("Fallback", (creator) => {
-			const children = creator.GetCurrentNodeData().children;
-			const fallback = new BTree.Fallback();
-			for (const child_id of children) {
-				const child_node = creator.GetCreatedNode(child_id);
-				fallback.AddChild(child_node);
-			}
-			return fallback;
-		});
-
-		this.AddNodeCreator("ReactiveFallback", (creator) => {
-			const children = creator.GetCurrentNodeData().children;
-			const fallback = new BTree.ReactiveFallback();
-			for (const child_id of children) {
-				const child_node = creator.GetCreatedNode(child_id);
-				fallback.AddChild(child_node);
-			}
-			return fallback;
-		});
-
-		this.AddNodeCreator("Parallel", (creator) => {
-			const children = creator.GetCurrentNodeData().children;
+		this.AddNodeCreator("Parallel", (c) => {
 			const success_policy =
-				creator.GetCurrentNodeParameter("successPolicy", "string") === "ALL"
+				c.GetCurrentNodeParameter("successPolicy", "string") === "ALL"
 					? BTree.EParallelPolicy.ALL
 					: BTree.EParallelPolicy.ONE;
-
 			const failure_policy =
-				creator.GetCurrentNodeParameter("failurePolicy", "string") === "ALL"
+				c.GetCurrentNodeParameter("failurePolicy", "string") === "ALL"
 					? BTree.EParallelPolicy.ALL
 					: BTree.EParallelPolicy.ONE;
-
-			const parallel = new BTree.Parallel(success_policy, failure_policy);
-			for (const child_id of children) {
-				const child_node = creator.GetCreatedNode(child_id);
-				parallel.AddChild(child_node);
-			}
-			return parallel;
+			return BTree.Parallel(success_policy, failure_policy, ...c.GetCurrentChildren());
 		});
 
-		this.AddNodeCreator("Inverter", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			return new BTree.Inverter(child_node);
+		this.AddNodeCreator("Inverter", (c) => BTree.Inverter(c.GetCurrentChild()));
+		this.AddNodeCreator("ForceSuccess", (c) => BTree.ForceSuccess(c.GetCurrentChild()));
+		this.AddNodeCreator("ForceFailure", (c) => BTree.ForceFailure(c.GetCurrentChild()));
+		this.AddNodeCreator("FireAndForget", (c) => BTree.FireAndForget(c.GetCurrentChild()));
+		this.AddNodeCreator("RunningGate", (c) => BTree.RunningGate(c.GetCurrentChild()));
+
+		this.AddNodeCreator("IfThenElse", (c) => {
+			const [condition, then_node, else_node] = c.GetCurrentChildren();
+			return BTree.IfThenElse(condition, then_node, else_node);
 		});
 
-		this.AddNodeCreator("ForceSuccess", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			return new BTree.ForceSuccess(child_node);
+		this.AddNodeCreator("WhileDoElse", (c) => {
+			const [condition, do_node, else_node] = c.GetCurrentChildren();
+			return BTree.WhileDoElse(condition, do_node, else_node);
 		});
 
-		this.AddNodeCreator("ForceFailure", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			return new BTree.ForceFailure(child_node);
+		this.AddNodeCreator("Action", (c) => {
+			const action_name = c.GetCurrentNodeParameter("actionName", "string");
+			return BTree.Action(c.GetAction(action_name), action_name);
 		});
 
-		this.AddNodeCreator("FireAndForget", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			return new BTree.FireAndForget(child_node);
+		this.AddNodeCreator("Condition", (c) => {
+			const condition_name = c.GetCurrentNodeParameter("conditionName", "string");
+			return BTree.Condition(c.GetCondition(condition_name), condition_name);
 		});
 
-		this.AddNodeCreator("RunningGate", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			return new BTree.RunningGate(child_node);
+		this.AddNodeCreator("Wait", (c) => BTree.Wait(c.GetCurrentNodeParameter("duration", "number")));
+		this.AddNodeCreator("WaitGate", (c) =>
+			BTree.WaitGate(c.GetCurrentNodeParameter("duration", "number")),
+		);
+
+		this.AddNodeCreator("Timer", (c) => {
+			const timer_name = c.GetCurrentNodeParameter("timerName", "string");
+			return BTree.Timer(c.GetField<number>(timer_name));
 		});
 
-		this.AddNodeCreator("IfThenElse", (creator) => {
-			const node_data = creator.GetCurrentNodeData();
-			const if_then_else = new BTree.IfThenElse();
-			for (const child_id of node_data.children) {
-				const child_node = creator.GetCreatedNode(child_id);
-				if_then_else.AddChild(child_node);
-			}
-			return if_then_else;
+		this.AddNodeCreator("SubTree", (c) => {
+			const sub_tree_name = c.GetCurrentNodeParameter("treeName", "string");
+			return c.GetSubTree(sub_tree_name)();
 		});
 
-		this.AddNodeCreator("WhileDoElse", (creator) => {
-			const node_data = creator.GetCurrentNodeData();
-			const while_do_else = new BTree.WhileDoElse();
-			for (const child_id of node_data.children) {
-				const child_node = creator.GetCreatedNode(child_id);
-				while_do_else.AddChild(child_node);
-			}
-			return while_do_else;
-		});
-
-		this.AddNodeCreator("Action", (creator) => {
-			const action_name = creator.GetCurrentNodeParameter("actionName", "string");
-			const action = creator.GetAction(action_name);
-			return new BTree.Action(action);
-		});
-
-		this.AddNodeCreator("Condition", (creator) => {
-			const condition_name = creator.GetCurrentNodeParameter("conditionName", "string");
-			const condition = creator.GetCondition(condition_name);
-			return new BTree.Condition(condition);
-		});
-
-		this.AddNodeCreator("Wait", (creator) => {
-			const duration = creator.GetCurrentNodeParameter("duration", "number");
-			return new BTree.Wait(duration);
-		});
-		this.AddNodeCreator("WaitGate", (creator) => {
-			const duration = creator.GetCurrentNodeParameter("duration", "number");
-			return new BTree.WaitGate(duration);
-		});
-
-		this.AddNodeCreator("Timer", (creator) => {
-			const timer_name = creator.GetCurrentNodeParameter("timerName", "string");
-			return new BTree.Timer(timer_name);
-		});
-
-		this.AddNodeCreator("SubTree", (creator) => {
-			const sub_tree_name = creator.GetCurrentNodeParameter("treeName", "string");
-			const sub_tree_creator = creator.GetSubTree(sub_tree_name);
-			return new BTree.SubTree(sub_tree_creator(creator.GetCurrentBlackboard()));
-		});
-
-		this.AddNodeCreator("Timeout", (creator) => {
-			const timeout_seconds = creator.GetCurrentNodeParameter("timeoutSeconds", "number");
-			const timeout_behavior_raw = creator.GetCurrentNodeParameter("timeoutBehavior", "string");
+		this.AddNodeCreator("Timeout", (c) => {
+			const timeout_seconds = c.GetCurrentNodeParameter("timeoutSeconds", "number");
 			const timeout_behavior =
-				timeout_behavior_raw === "FAILURE"
+				c.GetCurrentNodeParameter("timeoutBehavior", "string") === "FAILURE"
 					? BTree.ETimeoutBehavior.FAILURE
 					: BTree.ETimeoutBehavior.SUCCESS;
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			return new BTree.Timeout(child_node, timeout_seconds, timeout_behavior);
+			return BTree.Timeout(timeout_seconds, c.GetCurrentChild(), timeout_behavior);
 		});
 
-		this.AddNodeCreator("Repeat", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			const repeat_count = creator.GetCurrentNodeParameter("repeatCount", "number");
-			const repeat_condition_raw = creator.GetCurrentNodeParameter("repeatCondition", "string");
+		this.AddNodeCreator("Repeat", (c) => {
+			const repeat_count = c.GetCurrentNodeParameter("repeatCount", "number");
+			const repeat_condition_raw = c.GetCurrentNodeParameter("repeatCondition", "string");
 			const repeat_condition =
 				repeat_condition_raw === "SUCCESS"
 					? BTree.ERepeatCondition.SUCCESS
 					: repeat_condition_raw === "FAILURE"
 						? BTree.ERepeatCondition.FAILURE
 						: BTree.ERepeatCondition.ALWAYS;
-
-			return new BTree.Repeat(child_node, repeat_count, repeat_condition);
+			return BTree.Repeat(repeat_count, c.GetCurrentChild(), repeat_condition);
 		});
 
-		this.AddNodeCreator("Cooldown", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			const cooldown_seconds = creator.GetCurrentNodeParameter("cooldownSeconds", "number");
-			const reset_on_halt = creator.GetCurrentNodeParameter("resetOnHalt", "string") === "TRUE";
-			return new BTree.Cooldown(child_node, cooldown_seconds, reset_on_halt);
+		this.AddNodeCreator("Cooldown", (c) => {
+			const cooldown_seconds = c.GetCurrentNodeParameter("cooldownSeconds", "number");
+			const reset_on_halt = c.GetCurrentNodeParameter("resetOnHalt", "string") === "TRUE";
+			return BTree.Cooldown(cooldown_seconds, c.GetCurrentChild(), reset_on_halt);
 		});
 
-		this.AddNodeCreator("Switch", (creator) => {
-			const node_data = creator.GetCurrentNodeData();
-			const switch_node = new BTree.Switch(node_data.switch_case!.parameter_name);
-			for (const [case_name, case_id] of node_data.switch_case!.cases as unknown as Map<
-				string,
-				string
-			>) {
-				const case_node = creator.GetCreatedNode(case_id);
-				switch_node.Case(case_name, case_node);
+		this.AddNodeCreator("Switch", (c) => {
+			const switch_case = c.GetCurrentNodeData().switch_case!;
+			const cases = new Map<string, BTree.Node>();
+			for (const [case_name, case_id] of switch_case.cases as unknown as Map<string, string>) {
+				cases.set(case_name, c.GetCreatedNode(case_id));
 			}
-			if (node_data.switch_case!.default) {
-				const default_id = node_data.switch_case!.default;
-				const default_node = creator.GetCreatedNode(default_id);
-				switch_node.Default(default_node);
-			}
-			return switch_node;
+			const default_node =
+				switch_case.default !== undefined ? c.GetCreatedNode(switch_case.default) : undefined;
+			return BTree.Switch(c.GetSelector(switch_case.parameter_name), cases, default_node);
 		});
 
-		this.AddNodeCreator("Callback", (creator) => {
-			const callback_name = creator.GetCurrentNodeParameter("callbackName", "string");
-			const callback = creator.GetCallback(callback_name);
-			return new BTree.Callback(callback);
+		this.AddNodeCreator("Callback", (c) => {
+			const callback_name = c.GetCurrentNodeParameter("callbackName", "string");
+			return BTree.Callback(c.GetCallback(callback_name), callback_name);
 		});
 
-		this.AddNodeCreator("Plug", (creator) => {
-			const status = creator.GetCurrentNodeParameter("status", "string");
+		this.AddNodeCreator("Plug", (c) => {
+			const status = c.GetCurrentNodeParameter("status", "string");
 			let final_status: BTree.ENodeStatus;
 			if (status === "RUNNING") {
 				final_status = BTree.ENodeStatus.RUNNING;
@@ -585,77 +533,71 @@ export class BTCreator {
 			} else {
 				final_status = BTree.ENodeStatus.SUCCESS;
 			}
-
-			return new BTree.Plug(final_status);
+			return BTree.Plug(final_status);
 		});
 
-		this.AddNodeCreator("OneShot", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
+		this.AddNodeCreator("OneShot", (c) => {
 			const reset_on_become_inactive =
-				creator.GetCurrentNodeParameter("resetOnBecomeInactive", "string") === "TRUE";
-			return new BTree.OneShot(child_node, reset_on_become_inactive);
+				c.GetCurrentNodeParameter("resetOnBecomeInactive", "string") === "TRUE";
+			return BTree.OneShot(c.GetCurrentChild(), reset_on_become_inactive);
 		});
 	}
 
 	/** Loads v1 node creators (default set only) */
 	public LoadV1Nodes() {
-		this.LoadDefaultNodes();
-		this.AddNodeCreator("RetryUntilSuccess", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
-			return new BTree.KeepRunningUntilSuccess(child_node, max_attempts);
-		});
-
-		this.AddNodeCreator("RetryUntilFailure", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
-			return new BTree.KeepRunningUntilFailure(child_node, max_attempts);
-		});
+		this.AddNodeCreator("RetryUntilSuccess", (c) =>
+			BTree.KeepRunningUntilSuccess(
+				c.GetCurrentChild(),
+				c.GetCurrentNodeParameter("maxAttempts", "number"),
+			),
+		);
+		this.AddNodeCreator("RetryUntilFailure", (c) =>
+			BTree.KeepRunningUntilFailure(
+				c.GetCurrentChild(),
+				c.GetCurrentNodeParameter("maxAttempts", "number"),
+			),
+		);
 	}
 
 	/** Loads v2 node creators (adds v2 nodes on top of default) */
 	public LoadV2Nodes() {
-		this.AddNodeCreator("KeepRunningUntilSuccess", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
-			return new BTree.KeepRunningUntilSuccess(child_node, max_attempts);
+		this.AddNodeCreator("KeepRunningUntilSuccess", (c) =>
+			BTree.KeepRunningUntilSuccess(
+				c.GetCurrentChild(),
+				c.GetCurrentNodeParameter("maxAttempts", "number"),
+			),
+		);
+		this.AddNodeCreator("KeepRunningUntilFailure", (c) =>
+			BTree.KeepRunningUntilFailure(
+				c.GetCurrentChild(),
+				c.GetCurrentNodeParameter("maxAttempts", "number"),
+			),
+		);
+
+		this.AddNodeCreator("TryCatch", (c) => {
+			const [try_node, catch_node, finally_node] = c.GetCurrentChildren();
+			return BTree.TryCatch(try_node, catch_node, finally_node);
 		});
 
-		this.AddNodeCreator("KeepRunningUntilFailure", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			const max_attempts = creator.GetCurrentNodeParameter("maxAttempts", "number");
-			return new BTree.KeepRunningUntilFailure(child_node, max_attempts);
+		this.AddNodeCreator("WasEntryUpdated", (c) => {
+			const entries = c.GetCurrentNodeParameter("entries", "string").split(",");
+			const skip_first = c.GetCurrentNodeParameter("skipFirst", "string") === "TRUE";
+			const fields = new Array<Map<Slot, unknown>>(entries.size());
+			for (let i = 0; i < entries.size(); i++) fields[i] = c.GetField(entries[i]);
+			return BTree.WasFieldUpdated(fields, skip_first);
 		});
+		this.AddNodeCreator("Log", (c) => BTree.Log(c.GetCurrentNodeParameter("message", "string")));
+		this.AddNodeCreator("ForceRunning", (c) => BTree.ForceRunning(c.GetCurrentChild()));
 
-		this.AddNodeCreator("TryCatch", (creator) => {
-			const node_data = creator.GetCurrentNodeData();
-			const try_catch = new BTree.TryCatch();
-			for (const child_id of node_data.children) {
-				const child_node = creator.GetCreatedNode(child_id);
-				try_catch.AddChild(child_node);
-			}
-			return try_catch;
-		});
-
-		this.AddNodeCreator("WasEntryUpdated", (creator) => {
-			const entries_raw = creator.GetCurrentNodeParameter("entries", "string");
-			const entries = entries_raw.split(",") as unknown as string[];
-			const skip_first = creator.GetCurrentNodeParameter("skipFirst", "string") === "TRUE";
-			return new BTree.WasEntryUpdated(entries, skip_first);
-		});
-		this.AddNodeCreator("Log", (creator) => {
-			const message = creator.GetCurrentNodeParameter("message", "string");
-			return new BTree.Log(message);
-		});
-		this.AddNodeCreator("ForceRunning", (creator) => {
-			const child_id = creator.GetCurrentNodeData().children[0];
-			const child_node = creator.GetCreatedNode(child_id);
-			return new BTree.ForceRunning(child_node);
+		this.AddNodeCreator("Scope", (c) => {
+			const enter_name = c.GetCurrentNodeOptionalString("onEnter");
+			const exit_name = c.GetCurrentNodeOptionalString("onExit");
+			const enter = enter_name !== undefined ? c.GetCallback(enter_name) : undefined;
+			const exit = exit_name !== undefined ? c.GetCallback(exit_name) : undefined;
+			return BTree.Scope({
+				OnEnter: enter !== undefined ? (slot, tree) => enter(slot, 0, tree) : undefined,
+				OnExit: exit !== undefined ? (slot, tree) => exit(slot, 0, tree) : undefined,
+			});
 		});
 	}
 }

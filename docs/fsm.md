@@ -130,10 +130,11 @@ fsm.BindUpdate((dt, bb) => print("FSM updating"));
 
 ### BehaviorTreeConnector
 
-Embed a `BehaviorTree` as an FSM state:
+Drive one agent of a shared `BehaviorTree` as an FSM state. The FSM is per entity, the tree is shared, so the connector takes the entity's slot; it ticks that agent while the state is active and halts it on exit.
 
 ```typescript
-const btConnector = new FSM.BehaviorTreeConnector(myBehaviorTree);
+const slot = tree.AddAgent();
+const btConnector = new FSM.BehaviorTreeConnector(tree, slot);
 fsm.RegisterState("Combat", btConnector);
 ```
 

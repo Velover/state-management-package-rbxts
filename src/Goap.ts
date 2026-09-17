@@ -1,7 +1,7 @@
 //!native
 //!optimize 2
 
-import { BTree } from "BehaviorTree";
+import { BTree } from "./BehaviorTree";
 import { FSM } from "FSM";
 import { Blackboard } from "./Blackboard";
 
@@ -844,8 +844,12 @@ export namespace Goap {
 		}
 	}
 
+	/** Drives one agent of a shared behavior tree while this action runs; halts it when the action is halted. */
 	export abstract class BTConnector extends Action {
-		constructor(protected readonly bt_: BTree.BehaviorTree) {
+		constructor(
+			protected readonly bt_: BTree.BehaviorTree,
+			protected readonly slot_: BTree.Slot,
+		) {
 			super();
 		}
 
@@ -858,12 +862,12 @@ export namespace Goap {
 			world_state: WorldState,
 			active_nodes: Set<Action>,
 		): EActionStatus {
-			this.bt_.Tick(dt);
+			this.bt_.TickAgent(this.slot_, dt);
 			return EActionStatus.RUNNING;
 		}
 
 		protected override OnHalt(): void {
-			this.bt_.Halt();
+			this.bt_.Halt(this.slot_);
 		}
 	}
 }

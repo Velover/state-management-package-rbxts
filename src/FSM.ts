@@ -242,14 +242,18 @@ export namespace FSM {
 		}
 	}
 
+	/** Drives one agent of a shared behavior tree while this state is active; halts it on exit. */
 	export class BehaviorTreeConnector implements IFSMState {
-		constructor(private readonly tree_: BTree.BehaviorTree) {}
+		constructor(
+			private readonly tree_: BTree.BehaviorTree,
+			private readonly slot_: BTree.Slot,
+		) {}
 		OnEnter(bb: Blackboard): void {}
 		Update(dt_s: number): void {
-			this.tree_.Tick(dt_s);
+			this.tree_.TickAgent(this.slot_, dt_s);
 		}
 		OnExit(): void {
-			this.tree_.Halt();
+			this.tree_.Halt(this.slot_);
 		}
 	}
 

@@ -16,7 +16,7 @@ bun add @rbxts/state-management
 docs/
 ├── blackboard.md      — Key-value store shared across AI systems
 ├── fsm.md             — Finite State Machine with priority transitions and events
-├── behavior-tree.md   — Behavior Tree nodes, composites, decorators, and lifecycle
+├── behavior-tree.md   — Shared-tree Behavior Tree: one tree for all agents, nodes, lifecycle, ECS ids
 ├── goap.md            — Goal Oriented Action Planning with A* planner
 └── btcreator.md       — Data-driven BehaviorTree builder from JSON
 ```
@@ -25,7 +25,7 @@ docs/
 | -------------------------------------- | ------------ | ---------------------------------------------------------------------------- |
 | [Blackboard](docs/blackboard.md)       | `Blackboard` | Typed + untyped key-value store for sharing data between systems             |
 | [FSM](docs/fsm.md)                     | `FSM`        | Finite state machine with condition, event, and any-state transitions        |
-| [Behavior Tree](docs/behavior-tree.md) | `BTree`      | 20+ node types — composites, decorators, leaves, and cross-system connectors |
+| [Behavior Tree](docs/behavior-tree.md) | `BTree`      | Shared-tree behavior tree: 30+ node types, one tree for all agents, zero per-tick garbage |
 | [GOAP](docs/goap.md)                   | `Goap`       | A\*-based action planner with hierarchical goals and weighted requirements   |
 | [BTCreator](docs/btcreator.md)         | `BTCreator`  | Build behavior trees from JSON with a registry-based node factory            |
 
@@ -39,6 +39,7 @@ import { BTree, FSM, Goap, Blackboard, BTCreator } from "@rbxts/state-management
 
 | Version                                                                              | Highlights                                                                                  |
 | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| [0.4.0](docs/Changelog/0-4-0.md)                                                     | BehaviorTree rewritten as a shared tree (10–30x faster, zero garbage); BTCreator and connectors updated (breaking) |
 | [0.3.6](docs/Changelog/0-3-6.md#036--new-nodes-plug-and-oneshot)                     | New `Plug` and `OneShot` BehaviorTree nodes; BTCreator versioned schema support             |
 | [0.3.5](docs/Changelog/0-3-6.md#035--bug-fix-behaviortreehalt-incomplete-teardown)   | Fixed `BehaviorTree.Halt()` not cleaning up all running/active nodes                        |
 | [0.3.4](docs/Changelog/0-3-6.md#034--btcreator-versioned-schemas)                    | BTCreator versioned node loading (`1.0.0` / `2.0.0` schemas)                                |

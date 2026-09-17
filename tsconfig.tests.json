@@ -1,0 +1,12 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"rootDir": "src",
+		"outDir": "luau-bench/compiled-tests",
+		"baseUrl": "src",
+		"tsBuildInfoFile": "luau-bench/compiled-tests/tsconfig.tests.tsbuildinfo",
+		"declaration": false
+	},
+	"include": ["src/**/*.ts"],
+	"exclude": ["out", "external", "luau-bench", "src/goap.flat.index.wip.ts"]
+}

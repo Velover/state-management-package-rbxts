@@ -28,5 +28,5 @@
 
 		"declaration": true
 	},
-	"exclude": ["**/*.test.ts", "out"]
+	"exclude": ["**/*.test.ts", "out", "external", "luau-bench"]
 }

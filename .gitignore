@@ -2,3 +2,5 @@
 /out
 /include
 *.tsbuildinfo
+/luau-bench/compiled-tests
+/luau-bench/results/final

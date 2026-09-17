@@ -29,6 +29,10 @@ docs/
 | [GOAP](docs/goap.md)                   | `Goap`       | A\*-based action planner with hierarchical goals and weighted requirements   |
 | [BTCreator](docs/btcreator.md)         | `BTCreator`  | Build behavior trees from JSON with a registry-based node factory            |
 
+## BTCreator App
+
+[external/BTCreatorApp](external/BTCreatorApp/) is the visual editor that bakes the JSON `BTCreator` loads (Wails + React). Run it with `wails dev` from that folder; see its [baking docs](external/BTCreatorApp/docs/BakingSystem.md) for the file format.
+
 ## Quick Start
 
 ```typescript

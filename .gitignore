@@ -4,3 +4,4 @@
 *.tsbuildinfo
 /luau-bench/compiled-tests
 /luau-bench/results/final
+/external/BTCreatorApp/.vscode/

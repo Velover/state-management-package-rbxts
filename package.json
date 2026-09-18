@@ -24,7 +24,8 @@
 	"files": [
 		"out",
 		"docs",
-		"!**/*.tsbuildinfo"
+		"!**/*.tsbuildinfo",
+		"!out/**/*.wip.*"
 	],
 	"publishConfig": {
 		"access": "public"

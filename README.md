@@ -43,6 +43,7 @@ import { BTree, FSM, Goap, Blackboard, BTCreator } from "@rbxts/state-management
 
 | Version                                                                              | Highlights                                                                                  |
 | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| [0.4.1](docs/Changelog/0-4-1.md)                                                     | BehaviorTree fixes: TickAgent with several agents, removal/halt re-entrancy, throwing hooks no longer disable the tree |
 | [0.4.0](docs/Changelog/0-4-0.md)                                                     | BehaviorTree rewritten as a shared tree (10–30x faster, zero garbage); BTCreator and connectors updated (breaking) |
 | [0.3.6](docs/Changelog/0-3-6.md#036--new-nodes-plug-and-oneshot)                     | New `Plug` and `OneShot` BehaviorTree nodes; BTCreator versioned schema support             |
 | [0.3.5](docs/Changelog/0-3-6.md#035--bug-fix-behaviortreehalt-incomplete-teardown)   | Fixed `BehaviorTree.Halt()` not cleaning up all running/active nodes                        |

@@ -62,7 +62,7 @@ tree.RemoveAgent(slot); // halts its running nodes, calls OnAgentRemoved, destro
 
 A `BTree` tree is shared. Each node is a pair of functions, `Tick(slot, dt, tree)` and `Halt(slot, tree)`, and nodes hold their per-agent state in tables keyed by **slot**: `cursor[slot]`, `time_left[slot]`. An agent that never reaches a node has no entry in that node's tables, so it costs nothing there.
 
-Because nodes are shared, **never place the same node instance at two positions of a tree**: both positions would share the same per-agent state. Build it twice.
+Because nodes are shared, **never place the same node instance at two positions of a tree**: both positions would share the same per-agent state. Build it twice. For the same reason **a built node belongs to one tree**: its state is keyed by slot alone, so two trees that allocate their own slots would both write slot 1 into it, and `RemoveAgent` on one would clear the other's agent. Build a second copy for a second tree. (Two external-id trees whose ids never overlap are the one case where sharing a node is safe.)
 
 ### Slots
 
@@ -393,7 +393,8 @@ BTree.FSMConnector((slot) => fsms.get(slot)!);
 | `UsesExternalIds()`                | Whether the tree is in external-id mode.                                                                                         |
 | `AddAgent(id?)`                    | Adds an agent and returns its slot. Allocating mode: no argument. External-id mode: the entity id; throws if it is already live. |
 | `RemoveAgent(slot)`                | Halts everything running for the agent, clears its entry in every node and registered field, frees the slot.                     |
-| `Tick(dt)`                         | Ticks every live agent once.                                                                                                     |
+| `Tick(dt)`                         | Ticks every live agent once. Not allowed from a halt or removal callback (on a `TickAgent`-driven tree, `TickAgent` of another agent is). |
+| `TickAgent(slot, dt)`              | Ticks one agent, for a driver with its own loop (the FSM / GOAP connectors). Each call is one frame for that agent. See below.   |
 | `GetStatus(slot)`                  | Root status of the agent from the latest tick, or `undefined`.                                                                   |
 | `Halt(slot)` / `HaltAll()`         | Halt an agent (or all) without removing it; it restarts from the root next tick. Not allowed during `Tick`.                      |
 | `Field<T>(cleanup?)`               | Creates and registers a per-agent `Map<Slot, T>`; `cleanup(slot, value)` runs on removal when the agent has a value.             |
@@ -405,6 +406,10 @@ BTree.FSMConnector((slot) => fsms.get(slot)!);
 | `GetRoot()`                        | The root node.                                                                                                                   |
 | `TickCount`                        | Number of ticks so far. Nodes stamp per-agent state with it; do not modify.                                                      |
 
+### Tick or TickAgent, not both
+
+An agent is driven by `Tick()` or by `TickAgent()` for its whole life, never both. The two keep separate tick stamps (`Tick()` counts frames of the tree, `TickAgent()` counts frames of that agent), so nodes that compare stamps between visits (`MemorySequence`, `OneShot`, `WaitGate`, `WasFieldUpdated`) read a driver switch as a gap in visits: a `MemorySequence` drops its cursor without halting the child that was running there, which then never receives `OnHalt`. Children detached by `FireAndForget` / `RunningGate` / `Scope` are swept only by the end of frame of the driver that detached them, so after a switch they are halted late or not at all. Since `Tick()` ticks every live agent, a tree that is ticked with `Tick()` cannot also have `TickAgent()`-driven agents; use one driver per tree. That includes nested calls: on a `Tick()`-driven tree, do not call `TickAgent()` from a halt or removal callback either, even for another agent. The nested call stamps that agent's detached children with its own per-agent counter, and the sweep at the end of the `Tick()` frame then halts children the agent visited every frame. Calling `TickAgent()` of another agent from such a callback is fine only on a tree driven by `TickAgent()`. If an agent must change drivers, `Halt(slot)` it first so it restarts from the root under the new one.
+
 ### What RemoveAgent does, in order
 
 1. Halts everything running for the agent (leaf `OnHalt` hooks fire), including children detached by `FireAndForget` / `RunningGate`.
@@ -412,6 +417,13 @@ BTree.FSMConnector((slot) => fsms.get(slot)!);
 3. Runs the `OnAgentRemoved` callbacks. Field values are still readable here.
 4. For each registered field in registration order: runs its cleanup with the value if the agent has one, then deletes the entry.
 5. Frees the slot for reuse.
+
+### When a hook throws
+
+An error thrown by a hook never leaves the tree's own bookkeeping behind: the tree stays usable, and the first such error is rethrown by the outermost tree call (`Tick`, `TickAgent`, `Halt`, `HaltAll` or `RemoveAgent`), never by a tree call made from inside a callback (a nested `TickAgent` whose walk threw returns `FAILURE` and leaves the rethrow to the outer call).
+
+- At tick time (`OnTick`, `OnStart`, `OnEnter`, `OnSuccess` / `OnFailure` / `OnExit`, or an `OnHalt` fired by a mid-walk halt such as a `ReactiveSequence` switching branch), the error ends the walk of that agent for the frame: its nodes keep whatever state the walk reached, and it keeps the status of its previous tick. `Tick()` still walks the other agents, and the end-of-frame sweep and the queued adds and removals still run.
+- At halt time (`OnHalt`, `OnLeave`, an `OnAgentRemoved` callback, a field cleanup), the halt, removal or end-of-frame sweep it was part of continues: the remaining hooks still run (a `Parallel` still halts the siblings, a leaf's `OnExit` and `OnLeave` still follow its `OnHalt`), the agent is still fully halted or removed, and queued adds and removals are still applied.
 
 ### Adding and removing during Tick
 
@@ -434,7 +446,7 @@ The rules:
 
 1. Keep per-agent state in `Map<Slot, ...>` tables captured by the closures. A missing key means idle. Reset state when a run starts, not when it ends, so a halted run cannot leak stale values.
 2. Snapshot the children's `Tick` and `Halt` functions into locals or arrays at build time and call those.
-3. `Halt` may assume the node is running for that slot. It must halt the child (or children) it left running, then clear its own entries.
+3. `Halt` may assume the node is running for that slot. It must clear its own entries and halt the child (or children) it left running; clear first, as the built-in nodes do, so a child hook that throws leaves nothing behind. A node that halts more than one child, or runs a hook after halting one, should halt each through `tree.HaltChild(halt, slot)`: it runs the halt under `pcall` so a throwing hook does not stop the rest of the cascade (see `Parallel` in the source).
 4. `Maps` must list your own tables plus every child's `Maps`, so `RemoveAgent` can clear them.
 5. A node that reports a non-`RUNNING` status while leaving a child running must call `tree.DetachRunning(last_seen, halt, slot)` each tick (see `FireAndForget` in the source) so the tree can halt the child when the node stops being visited.
 
@@ -493,7 +505,7 @@ function EveryNth(n: number, child: BTree.Node): BTree.Node {
 | `Switch<T>("key").Case(v, node)`               | `Switch((slot) => key.get(slot), new Map([[v, node]]), default?)`                                   |
 | `Timer("key")`                                 | `Timer(field)`                                                                                      |
 | `WasEntryUpdated(["a", "b"])`                  | `WasFieldUpdated([a, b])`                                                                           |
-| `SubTree(other)`                               | Use the other tree's root node directly (nodes are shareable, but not at two positions of one tree) |
+| `SubTree(other)`                               | Place the subtree's root node in the parent tree directly (a built node belongs to one tree, at one position) |
 | `FSMConnector(fsm)`                            | `FSMConnector((slot) => fsms.get(slot)!)`                                                           |
 | `node.IsRunning()`                             | Not available on nodes; `tree.GetStatus(slot) === RUNNING` for the root                             |
 

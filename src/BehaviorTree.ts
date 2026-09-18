@@ -326,7 +326,8 @@ export namespace BTree {
 		const HaltRunning = (r: number, slot: Slot, tree: BehaviorTree) => {
 			let i = 0;
 			while (i < n) {
-				if (band(r, bits[i]) !== 0) halts[i](slot, tree);
+				// Guarded: a child whose hook throws must not leave the siblings after it running.
+				if (band(r, bits[i]) !== 0) tree.HaltChild(halts[i], slot);
 				i++;
 			}
 		};
@@ -784,7 +785,8 @@ export namespace BTree {
 		const halt: HaltFn = (slot, tree) => {
 			if (child_running.has(slot)) {
 				child_running.delete(slot);
-				ch(slot, tree);
+				// Guarded: a throwing child hook must not skip the leave of the span (`inside` retained, no OnExit).
+				tree.HaltChild(ch, slot);
 			}
 			if (inside.has(slot)) {
 				inside.delete(slot);
@@ -1035,8 +1037,8 @@ export namespace BTree {
 				return s;
 			},
 			(slot, tree) => {
+				if (reset_on_halt) time_left.set(slot, seconds); // before the child's halt: a throwing hook must not skip it
 				ch(slot, tree);
-				if (reset_on_halt) time_left.set(slot, seconds);
 			},
 			maps,
 		);
@@ -1130,7 +1132,11 @@ export namespace BTree {
 		}
 
 		const halt: HaltFn = (slot, tree) => {
-			if (OnHalt) OnHalt(slot, tree);
+			if (OnHalt) {
+				// Guarded when OnExit follows, so a throwing OnHalt does not skip it.
+				if (OnExit) tree.HaltChild(OnHalt, slot);
+				else OnHalt(slot, tree);
+			}
 			if (OnExit) OnExit(RUNNING, slot, tree);
 		};
 
@@ -1365,9 +1371,48 @@ export namespace BTree {
 	// Tree
 	// ─────────────────────────────────────────────────────────────────────────────────────────────
 
+	/**
+	 * Children left running by FireAndForget / RunningGate / Scope: two count-tracked lists swapped at the end
+	 * of every frame. The tree keeps one for Tick() and one per agent driven by TickAgent().
+	 */
+	interface Detached {
+		stamps: Map<Slot, number>[][];
+		halts: HaltFn[][];
+		slots: Slot[][];
+		count: number[];
+		cur: number;
+	}
+
+	function NewDetached(): Detached {
+		return { stamps: [[], []], halts: [[], []], slots: [[], []], count: [0, 0], cur: 0 };
+	}
+
+	/**
+	 * The walk of a Tick() frame, built once per tree so pcall can run it without a per-frame closure. It keeps
+	 * its resume point in an upvalue (cheaper per agent than a field): a hook that throws leaves it after the
+	 * agent that threw, so calling the walk again continues with the next agent; a completed walk resets it.
+	 */
+	function MakeWalk(tree: BehaviorTree, tick: TickFn, live: Slot[], status: Map<Slot, ENodeStatus>) {
+		let resume = 0;
+		return (dt: number) => {
+			const n = live.size();
+			let i = resume;
+			while (i < n) {
+				const slot = live[i];
+				i++;
+				resume = i;
+				status.set(slot, tick(slot, dt, tree));
+			}
+			resume = 0;
+		};
+	}
+
 	/** One shared tree plus the agents that run on it. */
 	export class BehaviorTree {
-		/** Number of Tick() calls so far. Nodes stamp per-agent state with it; do not modify. */
+		/**
+		 * Tick stamp nodes mark per-agent state with; do not modify. The number of Tick() calls so far, or,
+		 * while TickAgent() runs, that agent's own tick number (each TickAgent call is one frame for that agent).
+		 */
 		TickCount = 0;
 
 		private readonly status_ = new Map<Slot, ENodeStatus>();
@@ -1381,16 +1426,23 @@ export namespace BTree {
 		private readonly removed_callbacks_: ((slot: Slot, tree: BehaviorTree) => void)[] = [];
 		private readonly maps_: StateMap[];
 
-		// Children left running by FireAndForget / RunningGate: two count-tracked lists swapped each tick.
-		private readonly det_stamps_: Map<Slot, number>[][] = [[], []];
-		private readonly det_halts_: HaltFn[][] = [[], []];
-		private readonly det_slots_: Slot[][] = [[], []];
-		private readonly det_count_ = [0, 0];
-		private det_cur_ = 0;
+		private readonly det_ = NewDetached(); // agents ticked by Tick()
+		private readonly agent_det_ = new Map<Slot, Detached>(); // agents ticked by TickAgent(), created on first use
+		private readonly agent_tick_ = new Map<Slot, number>(); // per-agent tick counters for TickAgent()
+		private tick_agent_ = 0; // the slot TickAgent() is ticking, 0 otherwise
 
 		private ticking_ = false;
+		private readonly Walk_: (dt: number) => void; // the walk of a Tick() frame, see MakeWalk
+		private halting_ = 0; // depth of halt cascades / removals in flight: RemoveAgent is deferred meanwhile
+		private deactivating_ = 0; // the slot whose removal is in flight (its node state is already cleared), 0 otherwise
+		// First error thrown by a hook: at tick time (OnTick / OnStart / OnEnter / OnSuccess ...) or at halt time
+		// (OnHalt / OnLeave / OnAgentRemoved / field cleanup). Every walk and every halt-time hook runs under pcall
+		// so an error cannot leave the flags above out of step; the outermost tree call rethrows it once the halt,
+		// removal or frame it interrupted has completed.
+		private hook_error_: unknown;
 		private readonly pending_add_: Slot[] = [];
 		private readonly pending_remove_: Slot[] = [];
+		private readonly removing_ = new Set<Slot>(); // slots in pending_remove_ whose removal has not completed yet
 
 		/**
 		 * @param options.external_ids  When true, agents are identified by ids you pass to AddAgent (for example
@@ -1403,6 +1455,7 @@ export namespace BTree {
 		) {
 			this.maps_ = root_.Maps;
 			this.external_ids_ = options?.external_ids === true;
+			this.Walk_ = MakeWalk(this, root_.Tick, this.live_, this.status_);
 		}
 
 		/** Whether this tree takes external ids (ECS mode) rather than allocating its own slots. */
@@ -1470,11 +1523,24 @@ export namespace BTree {
 			return slot;
 		}
 
-		/** Halts everything running for the agent, clears its state in every node and field, frees the slot. */
+		/**
+		 * Halts everything running for the agent, clears its state in every node and field, frees the slot. A hook
+		 * that throws during the removal does not stop it: the teardown completes and the error is rethrown after.
+		 */
 		RemoveAgent(slot: Slot): void {
 			if (!this.pos_.has(slot)) return;
-			if (this.ticking_) this.pending_remove_.push(slot);
-			else this.Deactivate_(slot);
+			// Queued once per agent: the slot is marked until its teardown completes, so a second request for it
+			// meanwhile (from another agent, or from its own halt / removal callbacks) is dropped rather than
+			// queued behind it, where it would tear down whatever new agent reuses the slot by then.
+			if (this.removing_.has(slot)) return;
+			this.removing_.add(slot);
+			this.pending_remove_.push(slot);
+			// Deferred while a tick, a halt cascade or another removal is in flight: their callbacks may remove
+			// agents (including the one being halted), and a nested cascade would tear down state mid-cascade.
+			if (!this.ticking_ && this.halting_ === 0) {
+				this.Flush_();
+				this.Rethrow_();
+			}
 		}
 
 		HasAgent(slot: Slot): boolean {
@@ -1490,53 +1556,76 @@ export namespace BTree {
 			return this.live_.size();
 		}
 
-		/** Ticks every live agent once. Agents added or removed from callbacks take effect after the tick. */
+		/**
+		 * Ticks every live agent once. Agents added or removed from callbacks take effect after the tick. Not
+		 * allowed from a halt or removal callback: the agent being halted or removed is still live and would be
+		 * ticked mid-teardown (on a tree driven by TickAgent, TickAgent of another agent is fine there; on a tree
+		 * driven by Tick, no nested ticking at all). A hook that throws during the walk or the end-of-frame sweep
+		 * does not stop the frame: the other agents are still ticked, the sweep and the queued adds and removals
+		 * still run, and the error is rethrown after.
+		 */
 		Tick(dt: number): void {
+			if (this.halting_ > 0) throw "BTree: Tick cannot be called during a halt or removal";
 			this.TickCount += 1;
 			this.ticking_ = true;
-			const tick = this.root_.Tick;
-			const status = this.status_;
-			for (const slot of this.live_) {
-				status.set(slot, tick(slot, dt, this));
+			// The walk runs under pcall: an error from a tick-time hook must not unwind past the reset below, or
+			// the tree would stay "ticking" for good (every later Halt / TickAgent refused, every removal deferred
+			// forever). One pcall per frame, not per agent (that doubles the cost of the walk): after an error the
+			// walk is called again and continues with the next agent (see MakeWalk), and the agent that threw
+			// keeps the status of its previous tick.
+			for (;;) {
+				const [ok, err] = pcall(this.Walk_, dt);
+				if (ok) break;
+				this.Fail_(err);
 			}
 			this.ticking_ = false;
-			const prev = 1 - this.det_cur_;
-			if (this.det_count_[prev] > 0) this.SweepDetached_();
-			this.det_cur_ = prev;
-			if (this.pending_add_.size() > 0) {
-				for (const slot of this.pending_add_) this.Activate_(slot);
-				this.pending_add_.clear();
-			}
-			if (this.pending_remove_.size() > 0) {
-				for (const slot of this.pending_remove_) this.Deactivate_(slot);
-				this.pending_remove_.clear();
+			this.EndFrame_(this.det_);
+			// Deferred to the outer flush when called from a halt / removal callback: a nested flush would tear
+			// down the agent whose removal is in flight a second time.
+			if (this.halting_ === 0) {
+				this.Flush_();
+				this.Rethrow_();
 			}
 		}
 
 		/**
 		 * Ticks one agent instead of all of them, for drivers that own their own update loop (FSM / GOAP
-		 * connectors). Do not mix with Tick() for the same agent in the same frame. Not allowed during Tick().
+		 * connectors). Each call is one frame for that agent alone: its tick stamp and its detached children are
+		 * tracked per agent, so any number of agents can be driven this way on one tree. An agent is driven by
+		 * Tick() or by TickAgent() for its whole life, never both: the two keep separate tick stamps, and a switch
+		 * reads as a gap in visits to every node that compares stamps (a MemorySequence drops its cursor without
+		 * halting the running child; detached children are swept only by the driver that detached them). Halt the
+		 * agent first if it must change drivers. Not allowed during Tick(). On a tree driven by TickAgent, allowed
+		 * from halt and removal callbacks for any agent but the one being removed; on a tree driven by Tick() it
+		 * is not, even for another agent: the nested call stamps that agent's detached children with its own
+		 * counter, and the sweep at the end of the Tick() frame then halts children the agent still visits.
 		 */
 		TickAgent(slot: Slot, dt: number): ENodeStatus {
 			if (this.ticking_) throw "BTree: TickAgent cannot be called during Tick";
 			if (!this.pos_.has(slot)) throw `BTree: agent ${slot} does not exist`;
-			this.TickCount += 1;
+			if (slot === this.deactivating_) throw `BTree: agent ${slot} is being removed`;
+			const saved = this.TickCount;
+			const now = (this.agent_tick_.get(slot) ?? 0) + 1;
+			this.agent_tick_.set(slot, now);
+			this.TickCount = now;
+			this.tick_agent_ = slot;
 			this.ticking_ = true;
-			const s = this.root_.Tick(slot, dt, this);
-			this.status_.set(slot, s);
+			// Under pcall for the same reason as in Tick: the resets below must run whatever the hooks do. On an
+			// error the agent keeps its previous status, and the error is rethrown once the frame has completed
+			// (FAILURE is returned instead when this call is nested in a callback: the outermost call rethrows).
+			const [ok, s] = pcall(this.root_.Tick, slot, dt, this);
 			this.ticking_ = false;
-			const prev = 1 - this.det_cur_;
-			if (this.det_count_[prev] > 0) this.SweepDetached_();
-			this.det_cur_ = prev;
-			if (this.pending_add_.size() > 0) {
-				for (const p of this.pending_add_) this.Activate_(p);
-				this.pending_add_.clear();
+			if (ok) this.status_.set(slot, s as ENodeStatus);
+			else this.Fail_(s);
+			const det = this.agent_det_.get(slot);
+			if (det !== undefined) this.EndFrame_(det);
+			this.tick_agent_ = 0;
+			this.TickCount = saved;
+			if (this.halting_ === 0) {
+				this.Flush_();
+				this.Rethrow_();
 			}
-			if (this.pending_remove_.size() > 0) {
-				for (const p of this.pending_remove_) this.Deactivate_(p);
-				this.pending_remove_.clear();
-			}
-			return s;
+			return ok ? (s as ENodeStatus) : FAILURE;
 		}
 
 		/** Root status of the agent from the latest tick. */
@@ -1544,16 +1633,27 @@ export namespace BTree {
 			return this.status_.get(slot);
 		}
 
-		/** Halts everything running for one agent without removing it. It restarts from the root next tick. */
+		/**
+		 * Halts everything running for one agent without removing it. It restarts from the root next tick. A hook
+		 * that throws during the halt does not stop it: the halt completes and the error is rethrown after.
+		 */
 		Halt(slot: Slot): void {
 			if (this.ticking_) throw "BTree: Halt cannot be called during Tick";
 			this.HaltSlot_(slot);
+			if (this.halting_ === 0) {
+				this.Flush_();
+				this.Rethrow_();
+			}
 		}
 
 		/** Halts every agent. */
 		HaltAll(): void {
 			if (this.ticking_) throw "BTree: HaltAll cannot be called during Tick";
 			for (const slot of this.live_) this.HaltSlot_(slot);
+			if (this.halting_ === 0) {
+				this.Flush_();
+				this.Rethrow_();
+			}
 		}
 
 		GetRoot(): Node {
@@ -1566,12 +1666,31 @@ export namespace BTree {
 		 */
 		DetachRunning(last_seen: Map<Slot, number>, halt: HaltFn, slot: Slot): void {
 			last_seen.set(slot, this.TickCount);
-			const cur = this.det_cur_;
-			const n = this.det_count_[cur];
-			this.det_stamps_[cur][n] = last_seen;
-			this.det_halts_[cur][n] = halt;
-			this.det_slots_[cur][n] = slot;
-			this.det_count_[cur] = n + 1;
+			let det = this.det_;
+			if (this.tick_agent_ !== 0) {
+				const own = this.agent_det_.get(slot);
+				if (own !== undefined) det = own;
+				else {
+					det = NewDetached();
+					this.agent_det_.set(slot, det);
+				}
+			}
+			const cur = det.cur;
+			const n = det.count[cur];
+			det.stamps[cur][n] = last_seen;
+			det.halts[cur][n] = halt;
+			det.slots[cur][n] = slot;
+			det.count[cur] = n + 1;
+		}
+
+		/**
+		 * For nodes with more than one thing to halt or hooks to run after halting a child: runs `halt` under
+		 * pcall, so a hook that throws inside it does not stop the rest of the cascade. The error is kept and
+		 * rethrown by the outermost tree call once the halt, removal or frame it interrupted has completed.
+		 */
+		HaltChild(halt: HaltFn, slot: Slot): void {
+			const [ok, err] = pcall(halt, slot, this);
+			if (!ok) this.Fail_(err);
 		}
 
 		private Activate_(slot: Slot): void {
@@ -1579,18 +1698,28 @@ export namespace BTree {
 		}
 
 		private Deactivate_(slot: Slot): void {
-			if (!this.pos_.has(slot)) return; // queued twice during one tick
+			if (!this.pos_.has(slot)) return; // never expected: RemoveAgent queues a live slot once, and only Flush_ frees it
+			this.halting_ += 1;
+			this.deactivating_ = slot;
 			this.HaltSlot_(slot);
 			for (const m of this.maps_) m.delete(slot);
-			for (const callback of this.removed_callbacks_) callback(slot, this);
+			for (const callback of this.removed_callbacks_) {
+				const [ok, err] = pcall(callback, slot, this);
+				if (!ok) this.Fail_(err);
+			}
 			for (const m of this.fields_) {
 				const cleanup = this.field_cleanups_.get(m);
 				if (cleanup !== undefined) {
 					const value = m.get(slot);
-					if (value !== undefined) cleanup(slot, value as never);
+					if (value !== undefined) {
+						const [ok, err] = pcall(cleanup, slot, value as never);
+						if (!ok) this.Fail_(err);
+					}
 				}
 				m.delete(slot);
 			}
+			this.agent_tick_.delete(slot);
+			this.agent_det_.delete(slot);
 			const live = this.live_;
 			const p = this.pos_.get(slot)!;
 			const last = live.pop()!;
@@ -1600,39 +1729,111 @@ export namespace BTree {
 			}
 			this.pos_.delete(slot);
 			if (!this.external_ids_) this.free_.push(slot);
+			this.deactivating_ = 0;
+			this.halting_ -= 1;
 		}
 
 		private HaltSlot_(slot: Slot): void {
-			if (this.status_.get(slot) === RUNNING) this.root_.Halt(slot, this);
+			this.halting_ += 1;
+			const running = this.status_.get(slot) === RUNNING;
+			// Always cleared (GetStatus is undefined after a halt or removal), and before the cascade: a Halt of
+			// this slot from inside it is then a no-op instead of a second cascade over state the first one is
+			// already tearing down.
 			this.status_.delete(slot);
+			if (running) {
+				const [ok, err] = pcall(this.root_.Halt, slot, this);
+				if (!ok) this.Fail_(err);
+			}
+			this.HaltDetached_(this.det_, slot);
+			const own = this.agent_det_.get(slot);
+			if (own !== undefined) this.HaltDetached_(own, slot);
+			this.halting_ -= 1;
+		}
+
+		/** Halts every detached child of the slot in both lists and drops its entries. */
+		private HaltDetached_(det: Detached, slot: Slot): void {
 			for (let list = 0; list < 2; list++) {
-				const slots = this.det_slots_[list];
-				const halts = this.det_halts_[list];
-				const n = this.det_count_[list];
+				const slots = det.slots[list];
+				const halts = det.halts[list];
+				const n = det.count[list];
 				for (let i = 0; i < n; i++) {
 					if (slots[i] === slot) {
 						slots[i] = 0;
-						halts[i](slot, this);
+						const [ok, err] = pcall(halts[i], slot, this);
+						if (!ok) this.Fail_(err);
 					}
 				}
 			}
 		}
 
-		/** Halts detached children recorded last tick that were not re-detached this tick. */
-		private SweepDetached_(): void {
-			const prev = 1 - this.det_cur_;
-			const n = this.det_count_[prev];
-			const stamps = this.det_stamps_[prev];
-			const halts = this.det_halts_[prev];
-			const slots = this.det_slots_[prev];
-			const now = this.TickCount;
-			let i = 0;
-			while (i < n) {
-				const slot = slots[i];
-				if (slot !== 0 && stamps[i].get(slot) !== now) halts[i](slot, this);
-				i++;
+		/**
+		 * End of a frame for the buffer: halts the children detached in the previous frame that were not
+		 * re-detached in this one, then swaps the lists.
+		 */
+		private EndFrame_(det: Detached): void {
+			const prev = 1 - det.cur;
+			const n = det.count[prev];
+			if (n > 0) {
+				const stamps = det.stamps[prev];
+				const halts = det.halts[prev];
+				const slots = det.slots[prev];
+				const now = this.TickCount;
+				this.halting_ += 1;
+				let i = 0;
+				while (i < n) {
+					const slot = slots[i];
+					if (slot !== 0 && stamps[i].get(slot) !== now) {
+						const [ok, err] = pcall(halts[i], slot, this);
+						if (!ok) this.Fail_(err);
+					}
+					i++;
+				}
+				this.halting_ -= 1;
+				det.count[prev] = 0;
 			}
-			this.det_count_[prev] = 0;
+			det.cur = prev;
+		}
+
+		/** Keeps the first error thrown by a hook (tick-time or halt-time) until Rethrow_. */
+		private Fail_(err: unknown): void {
+			if (this.hook_error_ === undefined) this.hook_error_ = err === undefined ? "BTree: a hook threw nil" : err;
+		}
+
+		/**
+		 * Rethrows the error kept by Fail_, if any. Run by the outermost tree call (never by a call nested in a
+		 * halt or removal callback) once the halt, removal or frame it interrupted, and the flush after it, are
+		 * complete. Level 0: the message already carries the hook's position.
+		 */
+		private Rethrow_(): void {
+			const err = this.hook_error_;
+			if (err !== undefined) {
+				this.hook_error_ = undefined;
+				error(err, 0);
+			}
+		}
+
+		/**
+		 * Applies queued adds, then queued removals. A removal's callbacks may queue more of either (a TickAgent
+		 * from one queues adds and removes made during it), so removals are walked by index and the adds are
+		 * drained again before each: a queued add must be live before it can be removed.
+		 */
+		private Flush_(): void {
+			const adds = this.pending_add_;
+			const removes = this.pending_remove_;
+			let i = 0;
+			do {
+				if (adds.size() > 0) {
+					for (const slot of adds) this.Activate_(slot);
+					adds.clear();
+				}
+				if (i < removes.size()) {
+					const slot = removes[i];
+					this.Deactivate_(slot);
+					this.removing_.delete(slot); // only now may a request for this slot (a new agent in it) be queued
+					i++;
+				}
+			} while (i < removes.size() || adds.size() > 0);
+			if (i > 0) removes.clear();
 		}
 	}
 }

@@ -1,7 +1,7 @@
 {
 	"name": "@rbxts/state-management",
 	"version": "0.4.1",
-	"main": "out/init.lua",
+	"main": "out/init.luau",
 	"scripts": {
 		"build": "rbxtsc --verbose",
 		"watch": "rbxtsc -w --verbose",

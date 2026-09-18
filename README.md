@@ -17,6 +17,7 @@ docs/
 ├── blackboard.md      — Key-value store shared across AI systems
 ├── fsm.md             — Finite State Machine with priority transitions and events
 ├── behavior-tree.md   — Shared-tree Behavior Tree: one tree for all agents, nodes, lifecycle, ECS ids
+├── custom-nodes.md    — Writing your own composites and decorators for the Behavior Tree
 ├── goap.md            — Goal Oriented Action Planning with A* planner
 └── btcreator.md       — Data-driven BehaviorTree builder from JSON
 ```

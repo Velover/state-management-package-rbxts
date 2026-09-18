@@ -431,6 +431,8 @@ An error thrown by a hook never leaves the tree's own bookkeeping behind: the tr
 
 ## Writing Custom Nodes
 
+The full guide, with a pass-through decorator, a stateful decorator, a composite with a cursor, the tick-stamp pattern, `HaltChild`, `DetachRunning`, BTCreator registration and a test recipe, is [custom-nodes.md](custom-nodes.md). The short version:
+
 A node is a table with `Name`, `Tick`, `Halt`, and `Maps`:
 
 ```typescript

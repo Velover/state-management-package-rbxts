@@ -23,6 +23,7 @@
 	"types": "out/index.d.ts",
 	"files": [
 		"out",
+		"docs",
 		"!**/*.tsbuildinfo"
 	],
 	"publishConfig": {

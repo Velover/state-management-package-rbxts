@@ -20,6 +20,12 @@ function makeTree(root: BTree.Node) {
 	return { tree, slot, tick };
 }
 
+// Helper: the message of a caught error, without the "file:line: " prefix error() adds. (The tester's
+// toContainSubstring never fails on a string, so tests compare the whole message instead.)
+function message(err: unknown) {
+	return tostring(err).gsub("^.-:%d+: ", "")[0];
+}
+
 // ── Plug (stub node) ─────────────────────────────────────────────────
 
 test("Plug always returns SUCCESS", () => {
@@ -300,6 +306,84 @@ test("Parallel returns RUNNING while children are running", () => {
 	expect(makeTree(par).tick(0)).toBe(RUNNING);
 });
 
+test("Parallel ALL/ALL fails once every child has finished with mixed results, and starts over", () => {
+	const ALL = BTree.EParallelPolicy.ALL;
+	expect(makeTree(BTree.Parallel(ALL, ALL, BTree.Plug(SUCCESS), BTree.Plug(FAILURE))).tick(0)).toBe(
+		FAILURE,
+	);
+	let ticked_b = 0;
+	const par = BTree.Parallel(
+		ALL,
+		ALL,
+		BTree.Wait(1.0),
+		BTree.Action(() => {
+			ticked_b++;
+			return FAILURE;
+		}),
+	);
+	const { tick } = makeTree(par);
+	expect(tick(0.5)).toBe(RUNNING);
+	expect(tick(0.6)).toBe(FAILURE); // the Wait finished: every child is done, neither policy met
+	expect(ticked_b).toBe(1); // finished children are not ticked again while the Parallel runs
+	expect(tick(0.5)).toBe(RUNNING); // state cleared: both children start over
+	expect(ticked_b).toBe(2);
+});
+
+test("Parallel finishes once every child has finished, for every policy pair and with no children", () => {
+	const ONE = BTree.EParallelPolicy.ONE;
+	const ALL = BTree.EParallelPolicy.ALL;
+	// [success policy, failure policy, child results, expected]
+	const cases: [
+		BTree.EParallelPolicy,
+		BTree.EParallelPolicy,
+		BTree.ENodeStatus[],
+		BTree.ENodeStatus,
+	][] = [
+		[ALL, ALL, [], SUCCESS],
+		[ALL, ONE, [], SUCCESS],
+		[ONE, ALL, [], FAILURE],
+		[ONE, ONE, [], FAILURE],
+		[ALL, ALL, [SUCCESS, SUCCESS], SUCCESS],
+		[ALL, ALL, [FAILURE, FAILURE], FAILURE],
+		[ALL, ALL, [SUCCESS, FAILURE], FAILURE],
+		[ALL, ALL, [FAILURE, SUCCESS], FAILURE],
+		[ALL, ONE, [SUCCESS, SUCCESS], SUCCESS],
+		[ALL, ONE, [SUCCESS, FAILURE], FAILURE],
+		[ONE, ALL, [FAILURE, FAILURE], FAILURE],
+		[ONE, ALL, [FAILURE, SUCCESS], SUCCESS],
+		[ONE, ONE, [SUCCESS, FAILURE], SUCCESS],
+		[ONE, ONE, [FAILURE, SUCCESS], FAILURE],
+	];
+	for (const [sp, fp, results, expected] of cases) {
+		const label = `${sp}/${fp} [${results.join(",")}]`;
+		// Every child finishes in the first tick.
+		const same = new Array<BTree.Node>();
+		// Child i runs for i ticks first, so later children finish in later ticks.
+		const staggered = new Array<BTree.Node>();
+		results.forEach((result, i) => {
+			same.push(BTree.Plug(result));
+			let t = 0;
+			staggered.push(
+				BTree.Leaf({ OnStart: () => (t = 0), OnTick: () => (t++ < i ? RUNNING : result) }),
+			);
+		});
+		for (const children of [same, staggered]) {
+			const { tick } = makeTree(BTree.Parallel(sp, fp, ...children));
+			const ticks = math.max(results.size(), 1);
+			for (let run = 0; run < 2; run++) {
+				// By the tick in which the last child finishes, the Parallel has finished too (twice: it starts over).
+				let s = tick(0);
+				let n = 1;
+				while (s === RUNNING && n < ticks) {
+					s = tick(0);
+					n++;
+				}
+				expect(`${label} -> ${s}`).toBe(`${label} -> ${expected}`);
+			}
+		}
+	}
+});
+
 // ── Repeat ───────────────────────────────────────────────────────────
 
 test("Repeat executes child N times then returns SUCCESS", () => {
@@ -474,6 +558,115 @@ test("Switch selects a case by selector value with default fallback", () => {
 	expect(tree.GetStatus(b)).toBe(FAILURE);
 });
 
+// ── A throwing OnHalt caused mid-tick ────────────────────────────────
+
+// Helper: a leaf that runs until halted and whose OnHalt throws; logs "<name>+" on start, "<name>-" on halt.
+function throwingLeaf(log: string[], name: string) {
+	return BTree.Leaf({
+		OnStart: () => log.push(`${name}+`),
+		OnTick: () => RUNNING,
+		OnHalt: () => {
+			log.push(`${name}-`);
+			throw `${name} boom`;
+		},
+	});
+}
+
+test("A reactive composite completes a switch or a finish when the halted child's OnHalt throws", () => {
+	// [name, factory, what the first child returns to let the second one run]
+	const cases: [string, (...children: BTree.Node[]) => BTree.Node, BTree.ENodeStatus][] = [
+		["ReactiveSequence", BTree.ReactiveSequence, SUCCESS],
+		["ReactiveFallback", BTree.ReactiveFallback, FAILURE],
+	];
+	for (const [name, reactive, pass] of cases) {
+		const stop = pass === SUCCESS ? FAILURE : SUCCESS; // ends the composite from the first child
+		// Switch: the first child starts running while the second one runs.
+		{
+			const log: string[] = [];
+			let flip = false;
+			const { tree, slot, tick } = makeTree(
+				reactive(
+					BTree.Leaf({
+						OnStart: () => log.push("A+"),
+						OnTick: () => (flip ? RUNNING : pass),
+						OnHalt: () => log.push("A-"),
+					}),
+					BTree.Sequence(throwingLeaf(log, "B")),
+				),
+			);
+			tick(0);
+			flip = true;
+			const [ok, err] = pcall(() => tick(0));
+			expect(`${name}: ${ok ? "ok" : message(err)}`).toBe(`${name}: B boom`);
+			// Before the fix, every later tick halted the idle Sequence again and threw an internal error.
+			const [ok2, err2] = pcall(() => tick(0));
+			expect(`${name}: ${ok2 ? "ok" : message(err2)}`).toBe(`${name}: ok`);
+			tree.RemoveAgent(slot); // halts A, which the switch started
+			expect(`${name}: ${log.join(",")}`).toBe(`${name}: A+,B+,A+,B-,A-`);
+		}
+		// Finish: the first child ends the composite while the second one runs.
+		{
+			const log: string[] = [];
+			let flip = false;
+			const { tree, slot, tick } = makeTree(
+				reactive(
+					BTree.Action(() => (flip ? stop : pass)),
+					BTree.Sequence(throwingLeaf(log, "B")),
+				),
+			);
+			tick(0);
+			flip = true;
+			const [ok, err] = pcall(() => tick(0));
+			expect(`${name}: ${ok ? "ok" : message(err)}`).toBe(`${name}: B boom`);
+			expect(`${name}: ${tree.GetStatus(slot)}`).toBe(`${name}: ${stop}`); // finished in that tick
+			// Before the fix, the agent stayed RUNNING and this halted the idle composite: an internal error.
+			const [ok2, err2] = pcall(() => tree.Halt(slot));
+			expect(`${name}: ${ok2 ? "ok" : message(err2)}`).toBe(`${name}: ok`);
+			expect(`${name}: ${log.join(",")}`).toBe(`${name}: B+,B-`);
+		}
+	}
+});
+
+test("WhileDoElse and Timeout complete their tick when the child they halt throws in OnHalt", () => {
+	// WhileDoElse: [what the condition turns to while the DO branch runs, expected log]
+	const cases: [BTree.ENodeStatus, string][] = [
+		[FAILURE, "D+,D-,E+,E-"], // switch to the ELSE branch, halted on removal
+		[RUNNING, "D+,D-"], // the condition itself runs: no branch
+	];
+	for (const [after, expected] of cases) {
+		const log: string[] = [];
+		let cond = SUCCESS;
+		const { tree, slot, tick } = makeTree(
+			BTree.WhileDoElse(
+				BTree.Action(() => cond),
+				BTree.Sequence(throwingLeaf(log, "D")),
+				BTree.Leaf({
+					OnStart: () => log.push("E+"),
+					OnTick: () => RUNNING,
+					OnHalt: () => log.push("E-"),
+				}),
+			),
+		);
+		tick(0);
+		cond = after;
+		const [ok, err] = pcall(() => tick(0));
+		expect(`${after}: ${ok ? "ok" : message(err)}`).toBe(`${after}: D boom`);
+		// Before the fix, every later tick halted the idle DO branch again and threw an internal error.
+		const [ok2, err2] = pcall(() => tick(0));
+		expect(`${after}: ${ok2 ? "ok" : message(err2)}`).toBe(`${after}: ok`);
+		tree.RemoveAgent(slot);
+		expect(`${after}: ${log.join(",")}`).toBe(`${after}: ${expected}`);
+	}
+	const log: string[] = [];
+	const { tree, slot, tick } = makeTree(BTree.Timeout(1, BTree.Sequence(throwingLeaf(log, "T"))));
+	tick(0.5);
+	const [ok, err] = pcall(() => tick(0.6));
+	expect(ok ? "ok" : message(err)).toBe("T boom");
+	expect(tree.GetStatus(slot)).toBe(FAILURE); // expired in that tick
+	expect(tick(0.5)).toBe(RUNNING); // a new run; before the fix, an internal error on every tick
+	expect(log.join(",")).toBe("T+,T-,T+");
+});
+
 // ── Tree: agents ─────────────────────────────────────────────────────
 
 test("Agents on one tree have independent state", () => {
@@ -528,6 +721,108 @@ test("RemoveAgent halts and frees; removal during Tick is deferred", () => {
 	expect(tree.GetAgentCount()).toBe(1);
 	expect(tree.HasAgent(1)).toBeFalsy();
 	expect(halted).toBe(1);
+});
+
+test("Tick throws when called during Tick or TickAgent", () => {
+	let tree: BTree.BehaviorTree;
+	let visits = 0;
+	let inside = false; // one nested call per visit, so a Tick that does re-enter cannot recurse forever
+	const nested: string[] = [];
+	tree = new BTree.BehaviorTree(
+		BTree.Action(() => {
+			visits++;
+			if (!inside) {
+				inside = true;
+				const [ok, err] = pcall(() => tree.Tick(0));
+				inside = false;
+				nested.push(ok ? "ok" : message(err));
+			}
+			return RUNNING;
+		}),
+	);
+	const a = tree.AddAgent();
+	tree.Tick(0);
+	expect(visits).toBe(1); // not re-entered
+	expect(tree.TickCount).toBe(1);
+	expect(nested[0]).toBe("BTree: Tick cannot be called during Tick");
+	expect(tree.TickAgent(a, 0)).toBe(RUNNING);
+	expect(visits).toBe(2);
+	expect(nested[1]).toBe("BTree: Tick cannot be called during Tick");
+	tree.Halt(a); // the tree is not left ticking
+	expect(tree.GetStatus(a)).toBe(undefined);
+});
+
+test("TickAgent throws for an agent whose halt is in flight", () => {
+	const log: string[] = [];
+	const nested: string[] = [];
+	const tree = new BTree.BehaviorTree(
+		BTree.Parallel(
+			BTree.EParallelPolicy.ALL,
+			BTree.EParallelPolicy.ALL,
+			BTree.Leaf({
+				OnTick: () => RUNNING,
+				OnHalt: (slot, t) => {
+					const [ok, err] = pcall(() => t.TickAgent(slot, 0));
+					nested.push(ok ? "ok" : message(err));
+				},
+			}),
+			BTree.Sequence(
+				BTree.Leaf({
+					OnStart: () => log.push("start"),
+					OnTick: () => RUNNING,
+					OnHalt: () => log.push("halt"),
+				}),
+			),
+		),
+	);
+	const a = tree.AddAgent();
+	tree.TickAgent(a, 0);
+	tree.Halt(a);
+	expect(nested[0]).toBe(`BTree: agent ${a} is being halted`);
+	expect(tree.GetStatus(a)).toBe(undefined); // not restarted from inside its own halt
+	tree.Halt(a); // nothing left running, so no node is halted while idle
+	expect(tree.TickAgent(a, 0)).toBe(RUNNING);
+	expect(log.join(",")).toBe("start,halt,start");
+});
+
+test("TickAgent throws for an agent whose end-of-frame sweep is in flight", () => {
+	const log: string[] = [];
+	const nested: string[] = [];
+	let gate = true;
+	const tree = new BTree.BehaviorTree(
+		BTree.ReactiveSequence(
+			BTree.ForceSuccess(
+				BTree.ReactiveSequence(
+					BTree.Condition(() => gate),
+					BTree.FireAndForget(
+						BTree.Leaf({
+							OnTick: () => RUNNING,
+							OnHalt: (slot, t) => {
+								const [ok, err] = pcall(() => t.TickAgent(slot, 0));
+								nested.push(ok ? "ok" : message(err));
+							},
+						}),
+					),
+				),
+			),
+			BTree.FireAndForget(
+				BTree.Leaf({
+					OnStart: () => log.push("start"),
+					OnTick: () => RUNNING,
+					OnHalt: () => log.push("halt"),
+				}),
+			),
+			BTree.Plug(RUNNING),
+		),
+	);
+	const a = tree.AddAgent();
+	tree.TickAgent(a, 0);
+	gate = false; // the first FireAndForget is not visited: its child is halted at the end of the frame
+	tree.TickAgent(a, 0);
+	tree.TickAgent(a, 0);
+	expect(nested.size()).toBe(1);
+	expect(nested[0]).toBe(`BTree: agent ${a} is being halted`);
+	expect(log.join(",")).toBe("start"); // the second one is visited every frame: never halted
 });
 
 test("External-id trees use the given id and reject duplicates", () => {

@@ -83,9 +83,10 @@ function Gate(pred: (slot: BTree.Slot, tree: BTree.BehaviorTree) => boolean, chi
 		Tick: (slot, dt, tree) => {
 			if (!pred(slot, tree)) {
 				// Closing the gate on a running child: we stop ticking it, so we must halt it (halting rule).
+				// Guarded, so a throwing hook in the child cannot unwind our Tick before we return FAILURE.
 				if (child_running.has(slot)) {
 					child_running.delete(slot);
-					halt(slot, tree);
+					tree.HaltChild(halt, slot);
 				}
 				return FAILURE;
 			}
@@ -122,6 +123,28 @@ test("Gate blocks the child, halts it when it closes mid-run, and halts it on tr
 	tick(0);
 	tree.RemoveAgent(slot);
 	expect(log.join(",")).toBe("leaf:start,leaf:halt,leaf:start,leaf:halt,leaf:start,leaf:halt");
+});
+
+test("Gate still returns FAILURE when the child's OnHalt throws as it closes", () => {
+	const log: string[] = [];
+	let open = true;
+	const leaf = BTree.Leaf({
+		OnStart: () => log.push("leaf:start"),
+		OnTick: () => RUNNING,
+		OnHalt: () => {
+			log.push("leaf:halt");
+			throw "boom";
+		},
+	});
+	const { tree, slot, tick } = makeTree(Gate(() => open, leaf));
+	tick(0);
+	open = false;
+	const [ok] = pcall(() => tick(0));
+	expect(ok).toBe(false); // the error is rethrown once the frame is complete
+	expect(tree.GetStatus(slot)).toBe(FAILURE);
+	const [halted] = pcall(() => tree.Halt(slot)); // nothing is running: the leaf is not halted again
+	expect(halted).toBe(true);
+	expect(log.join(",")).toBe("leaf:start,leaf:halt");
 });
 
 // ── Example 3: a composite with a cursor ──────────────────────────────────────────────────────

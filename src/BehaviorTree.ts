@@ -227,8 +227,10 @@ export namespace BTree {
 					const s = ticks[i](slot, dt, tree);
 					if (s === RUNNING) {
 						if (prev !== i) {
-							if (prev !== undefined) halts[prev](slot, tree);
 							running.set(slot, i);
+							// Guarded, like every halt a Tick causes: a throwing hook must not unwind this Tick, or `prev`
+							// stays recorded (halted again next tick) and `i` is never recorded (never halted).
+							if (prev !== undefined) tree.HaltChild(halts[prev], slot);
 						}
 						return RUNNING;
 					}
@@ -239,7 +241,8 @@ export namespace BTree {
 					if (s === FAILURE) {
 						if (prev !== undefined) {
 							running.delete(slot);
-							halts[prev](slot, tree);
+							// Guarded too: unwound, this Tick would leave the parent recording it as running while idle.
+							tree.HaltChild(halts[prev], slot);
 						}
 						return FAILURE;
 					}
@@ -270,8 +273,8 @@ export namespace BTree {
 					const s = ticks[i](slot, dt, tree);
 					if (s === RUNNING) {
 						if (prev !== i) {
-							if (prev !== undefined) halts[prev](slot, tree);
 							running.set(slot, i);
+							if (prev !== undefined) tree.HaltChild(halts[prev], slot); // guarded: see ReactiveSequence
 						}
 						return RUNNING;
 					}
@@ -282,7 +285,7 @@ export namespace BTree {
 					if (s === SUCCESS) {
 						if (prev !== undefined) {
 							running.delete(slot);
-							halts[prev](slot, tree);
+							tree.HaltChild(halts[prev], slot);
 						}
 						return SUCCESS;
 					}
@@ -302,7 +305,7 @@ export namespace BTree {
 	/**
 	 * Ticks every child each tick. Completed children keep their result until the Parallel finishes.
 	 * ONE: the first SUCCESS (or FAILURE) halts the others and returns. ALL: waits for every child.
-	 * At most 32 children.
+	 * Once every child has finished without meeting the success policy, it returns FAILURE. At most 32 children.
 	 */
 	export function Parallel(
 		success_policy: EParallelPolicy,
@@ -382,7 +385,9 @@ export namespace BTree {
 					Clear(slot);
 					return SUCCESS;
 				}
-				if (!failure_one && nfail === n) {
+				// Every child finished and the success policy was not met: FAILURE. Covers failure policy ALL (every
+				// child failed), ALL/ALL with mixed results, and ONE/ONE with no children.
+				if (nsucc + nfail === n) {
 					Clear(slot);
 					return FAILURE;
 				}
@@ -474,15 +479,17 @@ export namespace BTree {
 				const current = branch.get(slot);
 				const c = ct(slot, dt, tree);
 				if (c === RUNNING) {
-					if (current === 1) dh(slot, tree);
-					else if (current === 2) eh!(slot, tree);
 					branch.set(slot, 0);
+					// Guarded: see the switch below.
+					if (current === 1) tree.HaltChild(dh, slot);
+					else if (current === 2) tree.HaltChild(eh!, slot);
 					return RUNNING;
 				}
 				const expected = c === SUCCESS ? 1 : 2;
 				if (current !== undefined && current !== 0 && current !== expected) {
-					if (current === 1) dh(slot, tree);
-					else eh!(slot, tree);
+					// Guarded, like every halt a Tick causes: unwound, this Tick would leave `current` recorded (halted
+					// again next tick) and its parent recording it as running.
+					tree.HaltChild(current === 1 ? dh : eh!, slot);
 				}
 				if (expected === 2 && et === undefined) {
 					branch.delete(slot);
@@ -866,8 +873,10 @@ export namespace BTree {
 				const started = time_left.get(slot);
 				const t = (started ?? seconds) - dt;
 				if (t <= 0) {
-					if (started !== undefined) ch(slot, tree); // the child was running
 					time_left.delete(slot);
+					// The child was running. Guarded, like every halt a Tick causes: unwound, this Tick would keep the
+					// timer (the idle child halted again next tick) and its parent would still record it as running.
+					if (started !== undefined) tree.HaltChild(ch, slot);
 					return expired;
 				}
 				const s = ct(slot, dt, tree);
@@ -1434,6 +1443,7 @@ export namespace BTree {
 		private ticking_ = false;
 		private readonly Walk_: (dt: number) => void; // the walk of a Tick() frame, see MakeWalk
 		private halting_ = 0; // depth of halt cascades / removals in flight: RemoveAgent is deferred meanwhile
+		private readonly halted_: Slot[] = []; // [depth]: the agent halted / swept / removed at that depth, or 0
 		private deactivating_ = 0; // the slot whose removal is in flight (its node state is already cleared), 0 otherwise
 		// First error thrown by a hook: at tick time (OnTick / OnStart / OnEnter / OnSuccess ...) or at halt time
 		// (OnHalt / OnLeave / OnAgentRemoved / field cleanup). Every walk and every halt-time hook runs under pcall
@@ -1547,7 +1557,10 @@ export namespace BTree {
 			return this.pos_.has(slot);
 		}
 
-		/** Live slots, in tick order. Do not modify. */
+		/**
+		 * Live slots, in tick order. Do not modify. This is the tree's own list, not a copy: RemoveAgent moves the
+		 * last slot into the removed one's place, so copy it before removing agents while iterating.
+		 */
 		GetAgents(): readonly Slot[] {
 			return this.live_;
 		}
@@ -1557,14 +1570,15 @@ export namespace BTree {
 		}
 
 		/**
-		 * Ticks every live agent once. Agents added or removed from callbacks take effect after the tick. Not
-		 * allowed from a halt or removal callback: the agent being halted or removed is still live and would be
-		 * ticked mid-teardown (on a tree driven by TickAgent, TickAgent of another agent is fine there; on a tree
-		 * driven by Tick, no nested ticking at all). A hook that throws during the walk or the end-of-frame sweep
-		 * does not stop the frame: the other agents are still ticked, the sweep and the queued adds and removals
-		 * still run, and the error is rethrown after.
+		 * Ticks every live agent once. Agents added or removed from callbacks take effect after the tick. Throws
+		 * when called during Tick / TickAgent, or from a halt or removal callback: the agent being halted or
+		 * removed is still live and would be ticked mid-teardown (on a tree driven by TickAgent, TickAgent of
+		 * another agent is fine there; on a tree driven by Tick, no nested ticking at all). A hook that throws
+		 * during the walk or the end-of-frame sweep does not stop the frame: the other agents are still ticked,
+		 * the sweep and the queued adds and removals still run, and the error is rethrown after.
 		 */
 		Tick(dt: number): void {
+			if (this.ticking_) throw "BTree: Tick cannot be called during Tick";
 			if (this.halting_ > 0) throw "BTree: Tick cannot be called during a halt or removal";
 			this.TickCount += 1;
 			this.ticking_ = true;
@@ -1595,15 +1609,19 @@ export namespace BTree {
 		 * Tick() or by TickAgent() for its whole life, never both: the two keep separate tick stamps, and a switch
 		 * reads as a gap in visits to every node that compares stamps (a MemorySequence drops its cursor without
 		 * halting the running child; detached children are swept only by the driver that detached them). Halt the
-		 * agent first if it must change drivers. Not allowed during Tick(). On a tree driven by TickAgent, allowed
-		 * from halt and removal callbacks for any agent but the one being removed; on a tree driven by Tick() it
-		 * is not, even for another agent: the nested call stamps that agent's detached children with its own
-		 * counter, and the sweep at the end of the Tick() frame then halts children the agent still visits.
+		 * agent first if it must change drivers. Throws during Tick() / TickAgent(). On a tree driven by TickAgent,
+		 * allowed from halt and removal callbacks for any agent but the one being halted (including the sweep of
+		 * its detached children) or removed, which throws; on a tree driven by Tick() it is not, even for another
+		 * agent: the nested call stamps that agent's detached children with its own counter, and the sweep at the
+		 * end of the Tick() frame then halts children the agent still visits.
 		 */
 		TickAgent(slot: Slot, dt: number): ENodeStatus {
 			if (this.ticking_) throw "BTree: TickAgent cannot be called during Tick";
 			if (!this.pos_.has(slot)) throw `BTree: agent ${slot} does not exist`;
 			if (slot === this.deactivating_) throw `BTree: agent ${slot} is being removed`;
+			// From a hook of the agent's own halt or end-of-frame sweep: the nested frame would restart nodes the
+			// halt is still tearing down, or be swept by the outer sweep against the outer frame's stamp.
+			if (this.halting_ > 0 && this.IsHalting_(slot)) throw `BTree: agent ${slot} is being halted`;
 			const saved = this.TickCount;
 			const now = (this.agent_tick_.get(slot) ?? 0) + 1;
 			this.agent_tick_.set(slot, now);
@@ -1684,9 +1702,10 @@ export namespace BTree {
 		}
 
 		/**
-		 * For nodes with more than one thing to halt or hooks to run after halting a child: runs `halt` under
-		 * pcall, so a hook that throws inside it does not stop the rest of the cascade. The error is kept and
-		 * rethrown by the outermost tree call once the halt, removal or frame it interrupted has completed.
+		 * For nodes with more than one thing to halt or hooks to run after halting a child, and for every halt a
+		 * node's Tick causes (a switch of child, a timeout): runs `halt` under pcall, so a hook that throws inside
+		 * it does not stop the rest of the cascade or the tick. The error is kept and rethrown by the outermost
+		 * tree call once the halt, removal or frame it interrupted has completed.
 		 */
 		HaltChild(halt: HaltFn, slot: Slot): void {
 			const [ok, err] = pcall(halt, slot, this);
@@ -1699,6 +1718,7 @@ export namespace BTree {
 
 		private Deactivate_(slot: Slot): void {
 			if (!this.pos_.has(slot)) return; // never expected: RemoveAgent queues a live slot once, and only Flush_ frees it
+			this.halted_[this.halting_] = slot;
 			this.halting_ += 1;
 			this.deactivating_ = slot;
 			this.HaltSlot_(slot);
@@ -1731,9 +1751,11 @@ export namespace BTree {
 			if (!this.external_ids_) this.free_.push(slot);
 			this.deactivating_ = 0;
 			this.halting_ -= 1;
+			this.halted_[this.halting_] = 0;
 		}
 
 		private HaltSlot_(slot: Slot): void {
+			this.halted_[this.halting_] = slot;
 			this.halting_ += 1;
 			const running = this.status_.get(slot) === RUNNING;
 			// Always cleared (GetStatus is undefined after a halt or removal), and before the cascade: a Halt of
@@ -1748,6 +1770,18 @@ export namespace BTree {
 			const own = this.agent_det_.get(slot);
 			if (own !== undefined) this.HaltDetached_(own, slot);
 			this.halting_ -= 1;
+			this.halted_[this.halting_] = 0;
+		}
+
+		/** Whether a halt, end-of-frame sweep or removal in flight is for this agent. */
+		private IsHalting_(slot: Slot): boolean {
+			const halted = this.halted_;
+			let depth = this.halting_;
+			while (depth > 0) {
+				depth -= 1;
+				if (halted[depth] === slot) return true;
+			}
+			return false;
 		}
 
 		/** Halts every detached child of the slot in both lists and drops its entries. */
@@ -1778,17 +1812,20 @@ export namespace BTree {
 				const halts = det.halts[prev];
 				const slots = det.slots[prev];
 				const now = this.TickCount;
-				this.halting_ += 1;
+				const depth = this.halting_;
+				this.halting_ = depth + 1;
 				let i = 0;
 				while (i < n) {
 					const slot = slots[i];
 					if (slot !== 0 && stamps[i].get(slot) !== now) {
+						this.halted_[depth] = slot;
 						const [ok, err] = pcall(halts[i], slot, this);
 						if (!ok) this.Fail_(err);
+						this.halted_[depth] = 0;
 					}
 					i++;
 				}
-				this.halting_ -= 1;
+				this.halting_ = depth;
 				det.count[prev] = 0;
 			}
 			det.cur = prev;

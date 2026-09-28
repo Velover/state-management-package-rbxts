@@ -1,82 +1,77 @@
 # Blackboard
 
-The `Blackboard` is a key-value store for sharing data between different parts of your AI or game logic. It supports typed keys via a generic record type, as well as untyped ("wild") keys for dynamic data.
+A `Blackboard` is a key-value store for sharing data between parts of your AI or game logic. The [FSM](fsm.md) passes one to every state hook, and a [GOAP](goap.md) `WorldState` is a blackboard with planning features added.
 
-## Basic Usage
+([Behavior trees](behavior-tree.md) don't use a blackboard. They keep per-agent data in [fields](behavior-tree.md#per-agent-data-fields), one `Map` per value.)
+
+A blackboard has two ways to reach its data, and both read and write the same store:
+
+- **Typed keys** (`Get`, `Set`, `Update`): names declared in a type you give the blackboard. The compiler checks the key and the value's type.
+- **Wild keys** (`GetWild`, `SetWild`, …): any string. Use them for data you didn't declare up front.
+
+## Typed keys
 
 ```typescript
 import { Blackboard } from "@rbxts/state-management";
 
-// Define a type for your blackboard data (optional but recommended)
-interface MyAgentBlackboard {
+type GuardData = {
 	health: number;
 	target?: Instance;
 	isAlert: boolean;
-}
+};
 
-// Create a blackboard with initial data
-const blackboard = new Blackboard<MyAgentBlackboard>({
+// Create it with the starting values.
+const blackboard = new Blackboard<GuardData>({
 	health: 100,
 	isAlert: false,
 });
 
-// Set and get typed values
 blackboard.Set("health", 90);
-const currentHealth = blackboard.Get("health"); // number
-print(currentHealth); // 90
+const health = blackboard.Get("health"); // number: 90
 
-// Update a typed value with a callback
-blackboard.Update("health", (current) => current - 10);
+// Update passes the current value to your function and stores what it returns.
+blackboard.Update("health", (current) => current - 10); // 80
 ```
 
-## Wild Keys
-
-Wild keys allow storing arbitrary data without a fixed schema. They are accessed by string name and are untyped by default.
+## Wild keys
 
 ```typescript
-// Set a wild key
 blackboard.SetWild("lastKnownPosition", new Vector3(10, 0, 5));
 
-// Get a wild key (returns T | undefined)
-const pos = blackboard.GetWild<Vector3>("lastKnownPosition");
+const pos = blackboard.GetWild<Vector3>("lastKnownPosition"); // Vector3 | undefined
+const pos2 = blackboard.GetWildOrDefault("lastKnownPosition", new Vector3(0, 0, 0)); // Vector3
 
-// Get with a default fallback
-const pos2 = blackboard.GetWildOrDefault<Vector3>("lastKnownPosition", new Vector3(0, 0, 0));
+// UpdateWild gets undefined when the key isn't set yet.
+const alertLevel = blackboard.UpdateWild<number>("alertLevel", (current) => (current ?? 0) + 1); // 1
 
-// Update a wild key with a callback
-const newHealth = blackboard.UpdateWild<number>("health", (current) => (current ?? 100) - 10);
-print(newHealth); // 80
-
-// Check existence and delete
 blackboard.HasWild("lastKnownPosition"); // true
 blackboard.DeleteWild("lastKnownPosition");
 ```
 
-## Type-safe Wild Access
-
-Use `GetWildOfType` / `GetOrDefaultWildOfType` for runtime type checking:
+The type parameter of `GetWild<T>` isn't checked at run time: you get whatever is stored. To check it, use the `...OfType` methods. Their second argument is **an example value of the type you expect** (`0` for a number, `""` for a string, `false` for a boolean), and its type is compared with the stored value's:
 
 ```typescript
-// Returns undefined and warns if the stored value has a different type
-const hp = blackboard.GetWildOfType("health", 0); // number | undefined
+// undefined, with a warning, if "health" holds something other than a number
+const hp = blackboard.GetWildOfType("health", 0);
 
-// Falls back to default if missing or wrong type
+// 100 if "health" is missing or holds something other than a number
 const hp2 = blackboard.GetOrDefaultWildOfType("health", 0, 100);
 ```
 
-## API Reference
+## API reference
 
-| Method                                          | Description                           |
-| ----------------------------------------------- | ------------------------------------- |
-| `Set(key, value)`                               | Set a typed key                       |
-| `Get(key)`                                      | Get a typed key                       |
-| `Update(key, fn)`                               | Update a typed key with a callback    |
-| `SetWild(key, value)`                           | Set an untyped key                    |
-| `GetWild<T>(key)`                               | Get an untyped key (`T \| undefined`) |
-| `GetWildOrDefault<T>(key, default)`             | Get an untyped key with fallback      |
-| `UpdateWild<T>(key, fn)`                        | Update an untyped key with a callback |
-| `GetWildOfType<T>(key, type)`                   | Get with runtime type check           |
-| `GetOrDefaultWildOfType<T>(key, type, default)` | Get with type check and fallback      |
-| `HasWild(key)`                                  | Check if an untyped key exists        |
-| `DeleteWild(key)`                               | Delete an untyped key                 |
-| `Cast<T>()`                                     | Reinterpret type parameter            |
+| Method                                          | Description                                                                                     |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `new Blackboard<T>(initial, wild?)`             | Creates a blackboard from the typed starting values, plus optional wild ones                    |
+| `Get(key)`                                      | Reads a typed key                                                                               |
+| `Set(key, value)`                               | Writes a typed key                                                                              |
+| `Update(key, fn)`                               | Stores `fn(current)` in a typed key and returns it                                              |
+| `GetWild<T>(key)`                               | Reads any key (`T \| undefined`)                                                                |
+| `GetWildOrDefault<T>(key, default)`             | Reads any key, or returns `default` when it isn't set                                           |
+| `SetWild(key, value)`                           | Writes any key and returns the value                                                            |
+| `UpdateWild<T>(key, fn)`                        | Stores `fn(current)` in any key (`current` may be `undefined`) and returns it                   |
+| `GetWildOfType(key, example)`                   | Reads any key if its value has the same type as `example`; otherwise warns, returns `undefined` |
+| `GetOrDefaultWildOfType(key, example, default)` | Like `GetWildOfType`, but returns `default` when the key is missing or has the wrong type       |
+| `HasWild(key)`                                  | Whether the key is set                                                                          |
+| `DeleteWild(key)`                               | Removes the key; returns whether it was set                                                     |
+| `Cast<T>()`                                     | The same blackboard, typed as `Blackboard<T>` (no copy, no checks)                              |

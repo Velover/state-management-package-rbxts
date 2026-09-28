@@ -1,77 +1,161 @@
-# Behavior Tree (BTree)
+# Behavior Tree (`BTree`)
 
-`BTree` is a behavior tree built for many agents on one tree. You build the tree once, add agents to it, and tick the tree once per frame; every agent walks the same nodes with its own state.
+A behavior tree decides what an AI agent does each frame. You build it out of small nodes: **conditions** ("do I have a target?"), **actions** ("walk to the next waypoint") and **composites** that combine them ("try to fight; if that fails, patrol").
 
-Version 0.4.0 replaced the previous class-based tree (one node object per agent) with this shared-tree design: on the same trees it is 10–30x faster per agent per tick, allocates nothing per tick, and uses about 30x less memory per agent. The numbers are in [Performance](#performance); the API differences are in [Migrating from 0.3](#migrating-from-03).
+`BTree` is built for games with many agents. You build **one** tree, add every NPC to it as an **agent**, and tick the tree once per frame. All agents walk the same nodes, and each one keeps its own progress.
 
-## Basic Usage
+**On this page**
+
+- [How a behavior tree works](#how-a-behavior-tree-works)
+- [Your first tree](#your-first-tree)
+- [Core concepts](#core-concepts): agents, per-agent data, interruptions, leaf hooks, Scope
+- [Node reference](#node-reference), starting with [which node do I need?](#which-node-do-i-need)
+- [BehaviorTree API](#behaviortree-api)
+- [Rules and edge cases](#rules-and-edge-cases)
+- [Writing custom nodes](#writing-custom-nodes)
+- [Migrating from 0.3](#migrating-from-03)
+- [Performance](#performance)
+
+---
+
+## How a behavior tree works
+
+Every frame, the tree starts at the root and walks down. Each node it reaches does its work and reports one of three statuses to its parent:
+
+| Status    | Meaning                                                  |
+| --------- | -------------------------------------------------------- |
+| `SUCCESS` | Finished, and it worked.                                 |
+| `FAILURE` | Finished, and it didn't work (or a condition was false). |
+| `RUNNING` | Not finished yet. Tick me again next frame.              |
+
+Composites look at their children's statuses to decide what to do next. The two you will use most:
+
+- **`Sequence`** runs its children in order and stops at the first one that fails. It succeeds only if all of them succeed. Read it as "do A, then B, then C".
+- **`Fallback`** runs its children in order and stops at the first one that succeeds. It fails only if all of them fail. Read it as "try A; if that doesn't work, try B".
+
+When a child returns `RUNNING`, its composite returns `RUNNING` too, and next frame it picks up at that same child.
+
+Here is a guard NPC drawn as a tree:
+
+```
+Fallback                              try each branch until one works
+├── Sequence                          1. fight
+│   ├── Condition  has a target?
+│   ├── Action     move to it         RUNNING until close enough
+│   └── Callback   hit it
+└── Sequence                          2. otherwise, patrol
+    ├── Action     walk to waypoint   RUNNING until it arrives
+    └── Wait       2 seconds
+```
+
+With no target, the condition fails, so the fight `Sequence` fails and the `Fallback` moves on to the patrol. With a target, the fight `Sequence` succeeds or keeps running, so the `Fallback` never gets to the patrol.
+
+---
+
+## Your first tree
+
+The guard above, in code:
 
 ```typescript
 import { BTree } from "@rbxts/state-management";
 
 const SUCCESS = BTree.ENodeStatus.SUCCESS;
-const FAILURE = BTree.ENodeStatus.FAILURE;
 const RUNNING = BTree.ENodeStatus.RUNNING;
 
-// Per-agent data: one Map per field, keyed by slot. Registered with the tree below so RemoveAgent clears them.
-const hp = new Map<BTree.Slot, number>();
-const target = new Map<BTree.Slot, Model>();
-const models = new Map<BTree.Slot, Model>();
+// Per-agent data: a Map keyed by the agent's slot (see "Per-agent data" below).
+const targets = new Map<BTree.Slot, Model>();
 
+// 1. Build the tree once. Every guard runs through these same nodes.
 const root = BTree.Fallback(
+	// Fight: if we have a target, move to it, then hit it.
 	BTree.Sequence(
-		BTree.Condition((slot) => target.has(slot)),
-		BTree.Cooldown(
-			2.0,
-			BTree.Leaf({
-				OnStart: (slot) => playAnimation(models.get(slot)!, "Attack"),
-				OnTick: (slot, dt) => (attackFinished(models.get(slot)!) ? SUCCESS : RUNNING),
-				OnHalt: (slot) => stopAnimation(models.get(slot)!, "Attack"),
-			}),
-		),
+		BTree.Condition((slot) => targets.has(slot)),
+		BTree.Action((slot) => (moveToTarget(slot) ? SUCCESS : RUNNING)),
+		BTree.Callback((slot) => hitTarget(slot)),
 	),
+	// Otherwise patrol: walk to the next waypoint, then wait 2 seconds.
 	BTree.Sequence(
-		BTree.Condition((slot) => hp.get(slot)! < 30),
-		BTree.Action((slot, dt) => (fleeStep(models.get(slot)!, dt) ? SUCCESS : RUNNING)),
+		BTree.Action((slot) => (walkToNextWaypoint(slot) ? SUCCESS : RUNNING)),
+		BTree.Wait(2),
 	),
-	BTree.Wait(1.0),
 );
 
 const tree = new BTree.BehaviorTree(root);
-tree.RegisterField(hp);
-tree.RegisterField(target);
-tree.RegisterField(models, (slot, model) => model.Destroy()); // cleanup runs when the agent is removed
-tree.OnAgentRemoved((slot) => leaderboard.Remove(slot));
+tree.RegisterField(targets); // removing an agent will delete its entry
 
-function Spawn(model: Model) {
-	const slot = tree.AddAgent();
-	models.set(slot, model);
-	hp.set(slot, 100);
-	return slot;
-}
+// 2. Add one agent per NPC. AddAgent returns the agent's slot, a number that identifies it.
+const slot = tree.AddAgent();
 
+// 3. Tick every agent once per frame.
 game.GetService("RunService").Heartbeat.Connect((dt) => tree.Tick(dt));
 
-// later
-tree.RemoveAgent(slot); // halts its running nodes, calls OnAgentRemoved, destroys the model, clears hp/target/models
+// 4. When the NPC despawns, remove its agent.
+tree.RemoveAgent(slot);
 ```
 
-## Concepts
+`moveToTarget`, `hitTarget` and `walkToNextWaypoint` stand for your own game code. Each receives the agent's slot, and the two movement functions return `true` once the agent has arrived.
 
-### One tree, many agents
+This is what the tree does for one guard with no target, frame by frame:
 
-A `BTree` tree is shared. Each node is a pair of functions, `Tick(slot, dt, tree)` and `Halt(slot, tree)`, and nodes hold their per-agent state in tables keyed by **slot**: `cursor[slot]`, `time_left[slot]`. An agent that never reaches a node has no entry in that node's tables, so it costs nothing there.
+| Frame      | What happens                                                                                             | Root returns |
+| ---------- | -------------------------------------------------------------------------------------------------------- | ------------ |
+| 1          | The condition fails, so the fight branch fails. The `Fallback` tries the patrol branch; the walk starts. | `RUNNING`    |
+| 2, 3, …    | The `Fallback` and the patrol `Sequence` pick up at the walk.                                            | `RUNNING`    |
+| Arrival    | The walk returns `SUCCESS`, and `Wait(2)` starts in the same frame.                                      | `RUNNING`    |
+| 2 s later  | The wait finishes, so the patrol branch succeeds, and so does the `Fallback`.                            | `SUCCESS`    |
+| Next frame | The root finished last frame, so the tree starts again from the top, with the target check.              | …            |
 
-Because nodes are shared, **never place the same node instance at two positions of a tree**: both positions would share the same per-agent state. Build it twice. For the same reason **a built node belongs to one tree**: its state is keyed by slot alone, so two trees that allocate their own slots would both write slot 1 into it, and `RemoveAgent` on one would clear the other's agent. Build a second copy for a second tree. (Two external-id trees whose ids never overlap are the one case where sharing a node is safe.)
+Two things to notice:
 
-### Slots
+- A node that finishes lets its parent move on **in the same frame**. The walk only stops early at a node that returns `RUNNING`.
+- While the patrol is running, the guard **does not look for targets**. The `Fallback` picks up at the running patrol branch and skips the fight branch until the patrol is over. The next section fixes that.
 
-An agent is a positive integer called a slot. A tree runs in one of two modes, chosen when it is created:
+### Making the guard react: reactive composites
 
-- **Allocating** (default): `tree.AddAgent()` hands out a small dense slot from a free list and recycles it after removal. Dense slots keep the state tables in Luau's fast array part.
-- **External ids** (`new BTree.BehaviorTree(root, { external_ids: true })`): `tree.AddAgent(entity)` uses your id as the slot. It must be a positive integer, and it throws if that id is already live, since two entities can never share a number. The tree never allocates or recycles ids in this mode; after `RemoveAgent(entity)` only you decide when the number is used again.
+For a new target to interrupt the patrol, make the root a `ReactiveFallback`. A reactive composite starts from its **first** child every frame instead of picking up at the running one. If an earlier child now succeeds or starts running, the later child that was running is **halted** (interrupted).
 
-The modes cannot be mixed on one tree, so an id can never collide with an allocated slot. Wiring an ECS:
+The fight branch has the same problem. Once "move to it" is running, a plain `Sequence` never checks "has a target?" again. A `ReactiveSequence` checks it every frame and halts the movement as soon as the target is gone.
+
+```typescript
+const root = BTree.ReactiveFallback(
+	BTree.ReactiveSequence(
+		BTree.Condition((slot) => targets.has(slot)),
+		BTree.Action((slot) => (moveToTarget(slot) ? SUCCESS : RUNNING)),
+		BTree.Callback((slot) => hitTarget(slot)),
+	),
+	BTree.Sequence(
+		BTree.Action((slot) => (walkToNextWaypoint(slot) ? SUCCESS : RUNNING)),
+		BTree.Wait(2),
+	),
+);
+```
+
+|                           | Picks up at the running child | Starts from the first child every frame |
+| ------------------------- | ----------------------------- | --------------------------------------- |
+| All must succeed ("and")  | `Sequence`                    | `ReactiveSequence`                      |
+| First success wins ("or") | `Fallback`                    | `ReactiveFallback`                      |
+
+Use the reactive version when the earlier children are **conditions that can change** while a later child runs. Put only quick checks before the child that runs: a reactive composite ticks every child before it again, every frame.
+
+---
+
+## Core concepts
+
+### Agents and slots
+
+An **agent** is one thing running the tree, usually one NPC. `tree.AddAgent()` adds an agent and returns its **slot**, a small positive integer that identifies it in this tree. Every callback receives the slot, and that is how your code knows which NPC it is acting for.
+
+Keep the slot with your NPC (for example in a `Map<Model, BTree.Slot>`), and call `tree.RemoveAgent(slot)` when the NPC goes away. The tree reuses freed slots for later agents.
+
+`tree.GetAgents()` returns the tree's own list of slots, not a copy, and `RemoveAgent` reorders that list. To remove agents while looping over them, loop over a copy, or about half of them get skipped:
+
+```typescript
+for (const slot of [...tree.GetAgents()]) tree.RemoveAgent(slot);
+```
+
+#### Using your own ids (ECS)
+
+If your agents already have integer ids, such as ECS entity ids, create the tree with `external_ids: true` and pass the id to `AddAgent`. The id becomes the slot:
 
 ```typescript
 const tree = new BTree.BehaviorTree(root, { external_ids: true });
@@ -79,130 +163,214 @@ world.OnEntityAdded((entity) => tree.AddAgent(entity));
 world.OnEntityRemoved((entity) => tree.RemoveAgent(entity));
 ```
 
-Every per-agent lookup is one table read keyed by the slot, so the density of your ids is the cost: measured on the benchmark trees, sparse or negative ids run 1.3–2.3x slower per agent-tick and use about 1.8x the memory of dense ones. Typical ECS entity indices are dense; something like `Player.UserId` is not.
+- Ids must be positive integers. `AddAgent` throws if that id is already in the tree.
+- In this mode the tree never picks or reuses ids. After `RemoveAgent(entity)`, you decide when that number comes back.
+- A tree either picks its own slots or takes your ids, and that is fixed when you create it. The two can't be mixed, so your ids can't collide with slots the tree picked.
+- Dense ids (1, 2, 3, … like typical ECS entity indices) are fastest. Sparse ids such as `Player.UserId` work, but they measured 1.3–2.3x slower per agent and use about 1.8x the memory, because each node's per-agent table can no longer use Luau's fast array storage.
 
-### Status
+### Per-agent data: fields
 
-| Value                 | Meaning                     |
-| --------------------- | --------------------------- |
-| `ENodeStatus.SUCCESS` | Node completed successfully |
-| `ENodeStatus.FAILURE` | Node failed                 |
-| `ENodeStatus.RUNNING` | Node is still in progress   |
+All agents share the same nodes, so a node can't hold "this guard's target". Keep per-agent data in a `Map` keyed by slot, one map per value. (`BTree` doesn't use a `Blackboard`; a map per value is also the fastest lookup.)
 
-Callbacks receive `(slot, dt, tree)` and return a status. Return the enum members (or locals holding them) rather than raw numbers.
-
-### Fields: per-agent data
-
-There is no `Blackboard` object. Per-agent data is a `Map<Slot, T>` per field, one lookup per access:
+Register your maps with the tree, and `RemoveAgent` deletes the agent's entries for you:
 
 ```typescript
-const ammo = tree.Field<number>(); // created and registered
+const ammo = tree.Field<number>(); // creates a Map<Slot, number> and registers it
 const anger = new Map<BTree.Slot, number>();
-tree.RegisterField(anger); // an existing map, registered so RemoveAgent clears it
+tree.RegisterField(anger); // registers a map you already have
 
+// Read and write them from any callback:
 BTree.Condition((slot) => (ammo.get(slot) ?? 0) > 0);
 BTree.Callback((slot) => ammo.set(slot, ammo.get(slot)! - 1));
 ```
 
-Registered fields lose the agent's entry when it is removed. A field can own a resource: pass a cleanup and it runs with the agent's value before the entry is cleared, only if the agent had one.
+A field can own a resource. Give it a cleanup function, and when an agent that has a value is removed, the function runs with that value:
 
 ```typescript
 const models = tree.Field<Model>((slot, model) => model.Destroy());
-const highlights = tree.Field<Highlight>((slot, h) => h.Destroy());
 ```
 
-For teardown that is not tied to one field, `tree.OnAgentRemoved((slot, tree) => ...)` runs for every removed agent while its field values are still readable.
+For cleanup that isn't tied to one field, use `tree.OnAgentRemoved((slot, tree) => ...)`. It runs for every removed agent while its field values can still be read.
 
-Nodes that need a value from you take a field: `Timer(field)`, `WasFieldUpdated([field, ...])`, and `Switch(selector, ...)` takes a function.
+A few built-in nodes read a field directly: [`Timer`](#timer) and [`WasFieldUpdated`](#wasfieldupdated).
 
-### Running and halting
+### Interruptions (halting)
 
-Per (node, agent) a node is either idle or running. A node starts running the first time it is ticked while idle, and goes idle when it returns `SUCCESS` or `FAILURE`.
+When a node is `RUNNING` and its parent decides not to tick it again, the parent **halts** it. The halt travels down the running path, so every running leaf underneath gets its `OnHalt` hook, however deep it is. Use `OnHalt` to undo what `OnStart` began: stop an animation, cancel a path, release a reservation.
 
-**Halting rule.** If a node is running for an agent at the end of a tick, then in the next tick it is either ticked again or halted. Never neither, never both. A parent that decides not to tick a child it left running halts it instead: a `ReactiveFallback` whose earlier child now succeeds halts the later one, `Parallel` with a `ONE` policy halts its siblings, `Timeout` halts its child when time runs out, and `RemoveAgent` and `Halt` halt from the root down.
+The tree guarantees that a node that was running at the end of a frame is, in the next frame, either ticked again or halted. It is never silently dropped (the one exception is a frame in which one of your tick hooks throws; see [When a hook throws](#when-a-hook-throws)). These halt a running node:
 
-Halting cascades along the running path, so a leaf's `OnHalt` always fires when its run is interrupted, no matter how deep it is.
+- a `ReactiveSequence` or `ReactiveFallback` switching away from a running child
+- `WhileDoElse` switching branches, `Timeout` running out, `Parallel` finishing while other children still run
+- `tree.Halt(slot)`, `tree.HaltAll()` and `tree.RemoveAgent(slot)`, which halt from the root down
 
-### Leaf lifecycle
+After `tree.Halt(slot)`, the agent stays in the tree and starts over from the root on its next tick.
 
-`Leaf` is the only node with user hooks. All are optional except `OnTick`.
+### Leaves and their hooks
 
-| Hook                         | When                                                                                            |
-| ---------------------------- | ----------------------------------------------------------------------------------------------- |
-| `OnStart(slot, tree)`        | The leaf starts a run (idle → running), before `OnTick` in the same tick.                       |
-| `OnTick(slot, dt, tree)`     | Every tick the leaf is visited. Returns the status.                                             |
-| `OnSuccess(slot, tree)`      | `OnTick` returned `SUCCESS`.                                                                    |
-| `OnFailure(slot, tree)`      | `OnTick` returned `FAILURE`.                                                                    |
-| `OnHalt(slot, tree)`         | A running leaf was interrupted.                                                                 |
-| `OnExit(status, slot, tree)` | After `OnSuccess` / `OnFailure`, and after `OnHalt` with `RUNNING` as the status.               |
-| `OnEnter(slot, tree)`        | First tick the leaf is visited after not being visited. A visit span covers any number of runs. |
-| `OnLeave(slot, tree)`        | End of the first tick the leaf is not visited, and on halt / `RemoveAgent`.                     |
+Leaves are where your code runs. Pick the simplest one that fits:
 
-Hooks are resolved once when the leaf is built. A leaf with only `OnTick` has no wrapper and no state at all; its `Tick` is your function. Only leaves with `OnStart` or exit hooks carry a `started` table, and only leaves with `OnEnter` / `OnLeave` carry the visit stamp (they are the same thing as wrapping the leaf in [Scoped](#scoped)).
+| Leaf            | Your function                 | Returns                             |
+| --------------- | ----------------------------- | ----------------------------------- |
+| `Condition(fn)` | `(slot, dt, tree) => boolean` | `SUCCESS` if true, `FAILURE` if not |
+| `Callback(fn)`  | `(slot, dt, tree) => void`    | always `SUCCESS`                    |
+| `Action(fn)`    | `(slot, dt, tree) => status`  | whatever you return                 |
+| `Leaf({...})`   | `OnTick` plus optional hooks  | whatever `OnTick` returns           |
 
-Run hooks and visit hooks answer different questions. `OnStart` / `OnHalt` bracket one run of the leaf: an attack that completes and starts again gets `OnStart` twice. `OnEnter` / `OnLeave` bracket the whole span in which the leaf keeps being reached, across runs, until its branch is abandoned.
+Use `Leaf` when something must happen as the action starts, finishes or gets interrupted:
 
-### Where OnBecameActivated / OnBecameInactive went
+```typescript
+BTree.Leaf({
+	Name: "Attack",
+	OnStart: (slot) => playAnimation(slot, "Attack"),
+	OnTick: (slot) => (animationFinished(slot, "Attack") ? SUCCESS : RUNNING),
+	OnHalt: (slot) => stopAnimation(slot, "Attack"), // interrupted before it finished
+});
+```
 
-They are no longer hooks on every node. Tracking "was this node visited last tick" for every node is what the old tree's per-tick sets paid for, so in `BTree` it is a node you opt into: `Scope` brackets the span in which a position of the tree is visited, and only agents that pass through it pay for the stamp.
+Every hook is optional except `OnTick`:
+
+| Hook                         | Called when                                                                                        |
+| ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| `OnStart(slot, tree)`        | A run begins (the leaf wasn't running). Called just before `OnTick`, in the same frame.            |
+| `OnTick(slot, dt, tree)`     | Every frame the leaf is ticked. Returns the status.                                                |
+| `OnSuccess(slot, tree)`      | `OnTick` returned `SUCCESS`.                                                                       |
+| `OnFailure(slot, tree)`      | `OnTick` returned `FAILURE`.                                                                       |
+| `OnHalt(slot, tree)`         | The leaf was running and got interrupted.                                                          |
+| `OnExit(status, slot, tree)` | Any run ended: after `OnSuccess` / `OnFailure` with that status, or after `OnHalt` with `RUNNING`. |
+| `OnEnter(slot, tree)`        | The leaf is reached, and it wasn't reached the frame before.                                       |
+| `OnLeave(slot, tree)`        | At the end of the first frame the leaf isn't reached, or right away when it is halted or removed.  |
+
+The first six hooks are about one **run**, from start to finish. `OnEnter` and `OnLeave` are about the **visit**: the stretch of consecutive frames in which the leaf is reached, which can hold many runs.
+
+For example, take an `Attack` leaf that needs two frames per attack, under `ReactiveSequence(Condition(inRange), Attack)`:
+
+| Frame | Situation                                                     | Hooks called                                         |
+| ----- | ------------------------------------------------------------- | ---------------------------------------------------- |
+| 1     | In range; the first attack starts                             | `OnEnter`, `OnStart`, `OnTick` → `RUNNING`           |
+| 2     | The first attack lands                                        | `OnTick` → `SUCCESS`, `OnSuccess`, `OnExit(SUCCESS)` |
+| 3     | Still in range; the second attack starts                      | `OnStart`, `OnTick` → `RUNNING`                      |
+| 4     | Out of range: the `ReactiveSequence` halts the running attack | `OnHalt`, `OnExit(RUNNING)`, `OnLeave`               |
+
+Hooks you leave out cost nothing. A leaf with only `OnTick` is just your function.
+
+### Running code when a branch starts or stops: Scope
+
+To run code when an agent enters or leaves a part of the tree ("start the combat music when combat begins, stop it when combat ends"), wrap that part in `Scoped`:
 
 ```typescript
 BTree.Sequence(
 	BTree.Condition((slot) => inCombat.get(slot) === true),
-	BTree.Scope({
-		OnEnter: (slot) => playCombatMusic(slot), // first visited tick
-		OnExit: (slot) => stopCombatMusic(slot), // end of the first tick not visited
-	}),
-	// ...combat actions
+	BTree.Scoped(
+		{
+			OnEnter: (slot) => playCombatMusic(slot), // first frame the branch is reached
+			OnExit: (slot) => stopCombatMusic(slot), // first frame it isn't (or on halt / removal)
+		},
+		combatBehavior,
+	),
 );
 ```
 
-`Scope` always returns `SUCCESS`. `Scoped(config, child)` does the same around a subtree and passes the child's status through, and a `Leaf` accepts the same pair as `OnEnter` / `OnLeave`. `OnExit` also fires on `Halt`, `HaltAll` and `RemoveAgent`.
+`Scoped` passes its child's status through unchanged. `OnEnter` fires on the first frame it is reached. `OnExit` fires at the end of the first frame it is **not** reached, and also when it is halted or its agent is removed.
 
-Prefer `Scope` at the head of a branch, or `Scoped` around it, when the event is about the branch: a leaf's own visit span depends on where the leaf sits (later children of a `Fallback` are only visited when earlier ones fail).
+`Scope({ OnEnter, OnExit })` is the same idea as a leaf. It has no child and always returns `SUCCESS`. Because it only notices the frames in which it is ticked, it has to sit somewhere that is reached **every frame** while the branch is active, such as inside a `ReactiveSequence`. Inside a plain `Sequence`, a `Scope` placed before a child that keeps running is skipped while that child runs (the `Sequence` picks up at the running child), so its `OnExit` fires on the next frame although the branch is still active. When in doubt, use `Scoped`.
 
-Cost: about 30–40 ns per agent per tick and ~70 bytes per agent, only where the node sits and only for agents that reach it; the rest of the tree is unaffected. That is roughly one extra leaf visit, so place it where you need the enter/exit events rather than at every composite (16 of them on the wide benchmark tree doubled its tick time).
+Each `Scope` or `Scoped` costs about 30–40 ns and ~70 bytes per agent that reaches it, roughly one extra leaf visit. Add them where you need the events, not around every composite.
 
-The same effect without a dedicated node is an always-running leaf inside `FireAndForget` (`OnStart` / `OnHalt` then bracket the visited span). Nodes that used the old hooks internally (`MemorySequence`, `WaitGate`, `OneShot`, `WasFieldUpdated`) detect the gap themselves with a per-agent tick stamp.
+---
 
-## Composite Nodes
+## Node reference
 
-### Sequence
+Decorators take their settings first and the child last: `Timeout(10, child)`, `Cooldown(2, child)`.
 
-Runs children left to right. `FAILURE` as soon as one child fails; `SUCCESS` when all succeed. Resumes at the running child next tick.
+### Which node do I need?
+
+| I want to…                                           | Use                                                                                                 |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Do steps in order, stop at the first failure         | [`Sequence`](#sequence)                                                                             |
+| Try options in order until one works                 | [`Fallback`](#fallback)                                                                             |
+| Keep checking conditions while an action runs        | [`ReactiveSequence`](#reactivesequence--reactivefallback)                                           |
+| Let a higher-priority option interrupt a running one | [`ReactiveFallback`](#reactivesequence--reactivefallback)                                           |
+| Retry a sequence from the step that failed           | [`MemorySequence`](#memorysequence)                                                                 |
+| Run several children at the same time                | [`Parallel`](#parallel)                                                                             |
+| Pick a branch once, when starting                    | [`IfThenElse`](#ifthenelse), [`Switch`](#switch)                                                    |
+| Pick a branch again every frame                      | [`WhileDoElse`](#whiledoelse)                                                                       |
+| Run a fallback step and a cleanup step               | [`TryCatch`](#trycatch)                                                                             |
+| Flip or override a result                            | [`Inverter`](#inverter), [`ForceSuccess` / `ForceFailure`](#forcesuccess--forcefailure)             |
+| Give up after some time                              | [`Timeout`](#timeout)                                                                               |
+| Stop something from happening too often              | [`Cooldown`](#cooldown)                                                                             |
+| Do something N times, or retry until it works        | [`Repeat`](#repeat), [`KeepRunningUntilSuccess`](#keeprunninguntilsuccess--keeprunninguntilfailure) |
+| Do something only once                               | [`OneShot`](#oneshot)                                                                               |
+| Wait a few seconds                                   | [`Wait`](#wait)                                                                                     |
+| Let a branch through every N seconds                 | [`WaitGate`](#waitgate)                                                                             |
+| Count down a per-agent timer                         | [`Timer`](#timer)                                                                                   |
+| React when a value changes                           | [`WasFieldUpdated`](#wasfieldupdated)                                                               |
+| Run code when a branch starts or stops               | [`Scoped`](#scoped), [`Scope`](#scope)                                                              |
+| Start something and move on without waiting for it   | [`FireAndForget`](#fireandforget)                                                                   |
+| Run an FSM or GOAP agent inside the tree             | [`FSMConnector` / `GoapConnector`](#fsmconnector--goapconnector)                                    |
+
+### Composites
+
+#### Sequence
 
 ```typescript
-BTree.Sequence(conditionNode, actionNode, anotherNode);
+BTree.Sequence(...children);
 ```
 
-### Fallback
+Ticks the children left to right. Returns `FAILURE` as soon as one fails and `SUCCESS` when all succeed. When a child returns `RUNNING`, the next frame picks up at that child without checking the ones before it again.
 
-Runs children left to right. `SUCCESS` as soon as one child succeeds; `FAILURE` when all fail. Resumes at the running child.
-
-### MemorySequence
-
-Like `Sequence`, but a failing child is remembered and the sequence retries from it next tick instead of from the first child. The memory resets when the node was not visited in the previous tick.
-
-### ReactiveSequence / ReactiveFallback
-
-Re-evaluate every child from the first each tick. When a child returns `RUNNING` (or `SUCCESS`, for `ReactiveFallback`), the previously running child is halted if it is a different one.
-
-### Parallel
-
-Ticks every child each tick. Completed children keep their result until the `Parallel` finishes; running children are halted on an early exit. At most 32 children.
+#### Fallback
 
 ```typescript
-BTree.Parallel(
-	BTree.EParallelPolicy.ONE, // succeed when ONE child succeeds
-	BTree.EParallelPolicy.ALL, // fail only when ALL children fail
-	monitorNode,
-	actionNode,
-);
+BTree.Fallback(...children);
 ```
 
-### IfThenElse
+Ticks the children left to right. Returns `SUCCESS` as soon as one succeeds and `FAILURE` when all fail. Like `Sequence`, it picks up at a `RUNNING` child.
 
-`IfThenElse(condition, then, else?)`. Evaluates the condition when starting; runs `then` on `SUCCESS`, `else` on `FAILURE` (`FAILURE` when there is no `else`). A running branch continues without re-evaluating the condition.
+#### ReactiveSequence / ReactiveFallback
+
+```typescript
+BTree.ReactiveSequence(...children);
+BTree.ReactiveFallback(...children);
+```
+
+Like `Sequence` and `Fallback`, but they start from the first child every frame. When an earlier child's result changes, the child that was running is halted. See [Making the guard react](#making-the-guard-react-reactive-composites).
+
+#### MemorySequence
+
+```typescript
+BTree.MemorySequence(...children);
+```
+
+Like `Sequence`, but when a child fails, the next frame retries **from that child** instead of from the first one, so steps that already succeeded don't run again. It forgets the failed step when the whole sequence succeeds, or when it wasn't ticked in the previous frame.
+
+#### Parallel
+
+```typescript
+BTree.Parallel(successPolicy, failurePolicy, ...children);
+```
+
+Ticks every unfinished child each frame. A child that has finished keeps its result until the `Parallel` itself finishes. The two policies say when that happens:
+
+- `EParallelPolicy.ONE`: as soon as one child succeeds (for the success policy) or fails (for the failure policy).
+- `EParallelPolicy.ALL`: once every child has succeeded (or failed).
+
+If every child has finished and neither policy was met, for example `ALL`/`ALL` with one success and one failure, it returns `FAILURE`. With no children, it returns `SUCCESS` when the success policy is `ALL` and `FAILURE` otherwise.
+
+If the `Parallel` finishes while some children are still running, they are halted. It takes at most 32 children.
+
+```typescript
+// Walk and scan at the same time: succeed when either one succeeds, fail only if both fail.
+BTree.Parallel(BTree.EParallelPolicy.ONE, BTree.EParallelPolicy.ALL, walkToGoal, scanForEnemies);
+```
+
+#### IfThenElse
+
+```typescript
+BTree.IfThenElse(condition, thenBranch, elseBranch?);
+```
+
+Checks `condition` when it starts, then runs `thenBranch` if the condition succeeded or `elseBranch` if it failed (or returns `FAILURE` if there is no `elseBranch`). The chosen branch runs until it finishes **without the condition being checked again**. Use `WhileDoElse` if it should be.
 
 ```typescript
 BTree.IfThenElse(
@@ -212,17 +380,29 @@ BTree.IfThenElse(
 );
 ```
 
-### WhileDoElse
+#### WhileDoElse
 
-`WhileDoElse(condition, do, else?)`. Re-evaluates the condition every tick; runs `do` while it succeeds, `else` while it fails, halting the other branch on a switch. No branch runs while the condition itself is `RUNNING`.
+```typescript
+BTree.WhileDoElse(condition, doBranch, elseBranch?);
+```
 
-### TryCatch
+Checks `condition` **every frame**. Runs `doBranch` while it succeeds and `elseBranch` while it fails, and halts the other branch when the result flips. With no `elseBranch`, returns `FAILURE` whenever the condition fails. While the condition itself returns `RUNNING`, neither branch runs.
 
-`TryCatch(try, catch, finally?)`. Runs `try`; on `FAILURE` runs `catch`; always runs `finally` when present, whose result is ignored.
+#### TryCatch
 
-### Switch
+```typescript
+BTree.TryCatch(tryBranch, catchBranch, finallyBranch?);
+```
 
-`Switch(selector, cases, default?)`. Calls `selector(slot, tree)` when starting, looks the value up in `cases`, and runs that child to completion; `default` when nothing matches, `FAILURE` when there is no default either.
+Runs `tryBranch`. If it fails, runs `catchBranch`, and the `TryCatch` reports that branch's result. Either way, `finallyBranch` runs last if you gave one; its result is ignored. If the `TryCatch` is halted before `finallyBranch` starts, `finallyBranch` doesn't run.
+
+#### Switch
+
+```typescript
+BTree.Switch(selector, cases, default?);
+```
+
+When it starts, calls `selector(slot, tree)` and runs the child stored under the returned value in `cases`. If nothing matches, it runs `default`, or returns `FAILURE` when there is no default. The selector isn't called again until the chosen child finishes.
 
 ```typescript
 BTree.Switch(
@@ -235,287 +415,332 @@ BTree.Switch(
 );
 ```
 
-## Decorator Nodes
+### Decorators
 
-Decorators take the child as an argument, after their parameters.
+A decorator wraps one child and changes how it runs or what it reports.
 
-### Inverter
+#### Inverter
 
-Swaps `SUCCESS` and `FAILURE`. `RUNNING` passes through.
+`BTree.Inverter(child)` turns `SUCCESS` into `FAILURE` and `FAILURE` into `SUCCESS`. `RUNNING` passes through.
 
-### ForceSuccess / ForceFailure
+#### ForceSuccess / ForceFailure
 
-Override the child's result unless it is `RUNNING`.
+`BTree.ForceSuccess(child)` reports `SUCCESS` when the child finishes, whatever its result. `BTree.ForceFailure(child)` reports `FAILURE`. `RUNNING` passes through.
 
-### ForceRunning
+#### ForceRunning
 
-Ticks the child, restarting it whenever it completes, and always returns `RUNNING`.
+`BTree.ForceRunning(child)` always reports `RUNNING`. The child starts over each time it finishes, so the branch loops until something halts it.
 
-### FireAndForget
-
-Ticks the child and always returns `SUCCESS`. A child left `RUNNING` keeps running and is halted by the tree at the end of the first tick in which this node is not visited. See [Where OnBecameActivated went](#where-onbecameactivated--onbecameinactive-went).
-
-### Scoped
-
-`Scoped({ OnEnter?, OnExit? }, child)`. Runs the child and passes its status through; `OnEnter` fires on the first tick of a visited span, `OnExit` at the end of the first tick in which this node is not visited (and on halt). A running child is halted before `OnExit`. See [Scope](#scope) for the leaf form.
-
-### RunningGate
-
-Passes `SUCCESS` / `FAILURE` through and turns `RUNNING` into `FAILURE`. The child keeps running the same way as with `FireAndForget`.
-
-### Timeout
-
-`Timeout(seconds, child, behavior?)`. Halts the child and returns `behavior` (`ETimeoutBehavior.FAILURE` by default) once the child has been running longer than `seconds`.
+#### Timeout
 
 ```typescript
-BTree.Timeout(10, longRunningNode, BTree.ETimeoutBehavior.SUCCESS);
+BTree.Timeout(seconds, child, behavior = ETimeoutBehavior.FAILURE);
 ```
 
-### Cooldown
-
-`Cooldown(seconds, child, reset_on_halt?)`. `FAILURE` while the cooldown runs; otherwise ticks the child and starts the cooldown when it completes. With `reset_on_halt`, being halted also starts the cooldown. Time only passes while the node is ticked.
+If the child is still running after `seconds`, halts it and returns `behavior`: `FAILURE` by default, or `SUCCESS` with `ETimeoutBehavior.SUCCESS`.
 
 ```typescript
-BTree.Cooldown(2.0, attackNode);
+BTree.Timeout(10, walkToGoal); // give up on the walk after 10 seconds
 ```
 
-### Repeat
-
-`Repeat(count, child, condition?)`. Runs the child `count` times, one completion per tick, returning `RUNNING` in between and `SUCCESS` at the end. `ERepeatCondition.SUCCESS` / `FAILURE` stop early (with `SUCCESS`) when the child returns anything else.
+#### Cooldown
 
 ```typescript
-BTree.Repeat(5, patrolStep, BTree.ERepeatCondition.SUCCESS);
+BTree.Cooldown(seconds, child, resetOnHalt = false);
 ```
 
-### KeepRunningUntilSuccess / KeepRunningUntilFailure
-
-`KeepRunningUntilSuccess(child, max_attempts = -1)`. Retries the child until it succeeds; `FAILURE` after `max_attempts` failures. `-1` means unlimited. The `Failure` variant mirrors it.
-
-### OneShot
-
-`OneShot(child, reset_on_inactive = false)`. Runs the child once and returns the cached result on every later tick. With `reset_on_inactive`, the result is forgotten when the node was not visited in the previous tick.
-
-## Leaf Nodes
-
-### Leaf
-
-The general leaf with the full [lifecycle](#leaf-lifecycle).
+Once the child finishes (success or failure), returns `FAILURE` for `seconds` without ticking it. With `resetOnHalt`, being interrupted also starts the cooldown. The cooldown only counts down on frames in which the node is ticked: while the agent is busy elsewhere in the tree, the timer is paused.
 
 ```typescript
-BTree.Leaf({
-	Name: "Patrol",
-	OnStart: (slot, tree) => {
-		/* begin */
-	},
-	OnTick: (slot, dt, tree) => RUNNING,
-	OnHalt: (slot, tree) => {
-		/* interrupted */
-	},
-	OnSuccess: (slot, tree) => {},
-	OnFailure: (slot, tree) => {},
-	OnExit: (status, slot, tree) => {},
-	OnEnter: (slot, tree) => {
-		/* the leaf started being visited */
-	},
-	OnLeave: (slot, tree) => {
-		/* the leaf stopped being visited */
-	},
-});
+BTree.Cooldown(2, attackBehavior); // at most one attack every 2 seconds
 ```
 
-### Action
-
-`Action((slot, dt, tree) => status, name?)`. Runs the callback each tick and returns its status. Equivalent to a `Leaf` with only `OnTick`.
-
-### Condition
-
-`Condition((slot, dt, tree) => boolean, name?)`. `SUCCESS` when the predicate holds, otherwise `FAILURE`.
-
-### Callback
-
-`Callback((slot, dt, tree) => void, name?)`. Runs the callback and returns `SUCCESS`.
-
-### Scope
-
-`Scope({ OnEnter?, OnExit? })`. Always returns `SUCCESS`. `OnEnter` fires on the first tick of a visited span, `OnExit` at the end of the first tick in which the node is not visited, and on `Halt` / `RemoveAgent`. The replacement for `OnBecameActivated` / `OnBecameInactive`; put it at the start of the branch whose visits you want to observe.
+#### Repeat
 
 ```typescript
-BTree.Scope({
-	OnEnter: (slot) => (highlights.get(slot)!.Enabled = true),
-	OnExit: (slot) => (highlights.get(slot)!.Enabled = false),
-});
+BTree.Repeat(count, child, condition = ERepeatCondition.ALWAYS);
 ```
 
-### Plug
+Runs the child `count` times, then returns `SUCCESS`. Each run takes at least one frame, and `Repeat` returns `RUNNING` between runs. The optional condition can end the loop early:
 
-`Plug(status = SUCCESS)`. Always returns the given status. Useful for stubbing branches and for tests.
+- `ERepeatCondition.SUCCESS`: keep going only while the child succeeds.
+- `ERepeatCondition.FAILURE`: keep going only while the child fails.
 
-### Log
-
-`Log(message)`. Prints the message and returns `SUCCESS`.
-
-### Wait
-
-`Wait(seconds)`. `RUNNING` for the duration, then `SUCCESS`.
-
-### WaitGate
-
-`WaitGate(seconds)`. `FAILURE` until `seconds` of visited ticks have passed, then `SUCCESS` and the timer restarts. The timer also restarts when the node was not visited in the previous tick. Never returns `RUNNING`.
-
-### Timer
-
-`Timer(field)`. Counts the agent's entry in `field` down by `dt` each tick; `SUCCESS` once it reaches zero, `FAILURE` while positive or absent.
+A loop that ends early still returns `SUCCESS`.
 
 ```typescript
-const alert = tree.Field<number>();
-alert.set(slot, 5); // 5 seconds
-BTree.Timer(alert);
+BTree.Repeat(5, patrolStep, BTree.ERepeatCondition.SUCCESS); // up to 5 steps; stop at the first failed one
 ```
 
-### WasFieldUpdated
+#### KeepRunningUntilSuccess / KeepRunningUntilFailure
 
-`WasFieldUpdated([field, ...], skip_first = false)`. `SUCCESS` when any of the fields changed for the agent since the previous visited tick. The first visit after a gap reports `SUCCESS` and takes a snapshot, or `FAILURE` with `skip_first`.
+```typescript
+BTree.KeepRunningUntilSuccess(child, maxAttempts = -1);
+BTree.KeepRunningUntilFailure(child, maxAttempts = -1);
+```
 
-### FSMConnector / GoapConnector
+`KeepRunningUntilSuccess` retries the child after each failure, with the next attempt on the next frame, and returns `SUCCESS` once the child succeeds. After `maxAttempts` failures it gives up and returns `FAILURE`; `-1` means it never gives up. `KeepRunningUntilFailure` is the mirror image.
 
-`FSMConnector((slot, tree) => FSM.FSM)` starts the agent's FSM on start, updates it each tick (always `RUNNING`), and stops it on halt. `GoapConnector((slot, tree) => Goap.Agent)` updates the agent each tick and resets it on halt. Both take a getter because the FSM or GOAP agent is per agent while the node is shared.
+#### OneShot
+
+```typescript
+BTree.OneShot(child, resetOnInactive = false);
+```
+
+Runs the child once. After that, returns the same result every frame without ticking the child again, until the agent is removed. With `resetOnInactive`, the result is forgotten whenever the `OneShot` wasn't ticked in the previous frame, so the child runs again the next time the branch is entered.
+
+#### FireAndForget
+
+```typescript
+BTree.FireAndForget(child);
+```
+
+Ticks the child and returns `SUCCESS` right away, so the parent moves on. If the child returned `RUNNING`, it stays running and is ticked again each time the `FireAndForget` is ticked. It is halted at the end of the first frame in which the `FireAndForget` isn't ticked.
+
+That last rule matters. In a plain `Sequence`, a `FireAndForget` placed before a child that keeps running is not ticked again while that child runs (the `Sequence` picks up at the running child), so its own child is halted one frame later. `FireAndForget` works as you'd expect in a place that is reached every frame, such as inside a reactive composite.
+
+#### RunningGate
+
+```typescript
+BTree.RunningGate(child);
+```
+
+Passes `SUCCESS` and `FAILURE` through, but reports `RUNNING` as `FAILURE`. A running child keeps running under the same rule as `FireAndForget`: it is halted at the end of the first frame in which the `RunningGate` isn't ticked.
+
+#### Scoped
+
+```typescript
+BTree.Scoped({ OnEnter?, OnExit? }, child);
+```
+
+Runs the child and passes its status through. `OnEnter` fires on the first frame it is reached, and `OnExit` at the end of the first frame it isn't (and on halt or removal). A running child is halted before `OnExit`. See [Running code when a branch starts or stops](#running-code-when-a-branch-starts-or-stops-scope).
+
+### Leaves
+
+#### Action
+
+`BTree.Action((slot, dt, tree) => status, name?)` calls your function every frame it is ticked and returns its status.
+
+#### Condition
+
+`BTree.Condition((slot, dt, tree) => boolean, name?)` returns `SUCCESS` when your function returns `true`, and `FAILURE` otherwise.
+
+#### Callback
+
+`BTree.Callback((slot, dt, tree) => void, name?)` calls your function and returns `SUCCESS`.
+
+#### Leaf
+
+`BTree.Leaf({ Name?, OnTick, OnStart?, OnHalt?, OnSuccess?, OnFailure?, OnExit?, OnEnter?, OnLeave? })` is a leaf with lifecycle hooks. See [Leaves and their hooks](#leaves-and-their-hooks).
+
+#### Scope
+
+`BTree.Scope({ OnEnter?, OnExit? })` always returns `SUCCESS`. `OnEnter` fires on the first frame it is ticked, and `OnExit` at the end of the first frame it isn't (and on halt or removal). It must be ticked every frame the branch is active; see [Running code when a branch starts or stops](#running-code-when-a-branch-starts-or-stops-scope).
+
+```typescript
+BTree.ReactiveSequence(
+	BTree.Condition((slot) => alerted.get(slot) === true),
+	BTree.Scope({
+		OnEnter: (slot) => (highlights.get(slot)!.Enabled = true),
+		OnExit: (slot) => (highlights.get(slot)!.Enabled = false),
+	}),
+	searchBehavior,
+);
+```
+
+#### Wait
+
+`BTree.Wait(seconds)` returns `RUNNING` for `seconds`, then `SUCCESS`.
+
+#### WaitGate
+
+`BTree.WaitGate(seconds)` returns `FAILURE` until it has been ticked for `seconds` without a break, then returns `SUCCESS` once, and the timer starts over. A frame in which it isn't ticked also restarts the timer. It never returns `RUNNING`, so it never holds up its parent.
+
+#### Timer
+
+`BTree.Timer(field)` counts the agent's value in `field` down by `dt` on every frame it is ticked. It returns `SUCCESS` once the value reaches zero (and keeps returning `SUCCESS` until you set a new value), and `FAILURE` while the value is still positive or the agent has none. Start or restart the timer by setting the field.
+
+```typescript
+const alertTime = tree.Field<number>();
+alertTime.set(slot, 5); // start a 5-second timer for this agent
+
+BTree.Timer(alertTime); // the node, somewhere in the tree
+```
+
+#### WasFieldUpdated
+
+`BTree.WasFieldUpdated([field, ...], skipFirst = false)` returns `SUCCESS` when any of the fields changed for this agent since the last frame it was ticked, and `FAILURE` otherwise. Values are compared with `===`, so storing a new value counts as a change, but changing a table in place doesn't. When the node is ticked after a gap (or for the first time), it records the current values and returns `SUCCESS`, or `FAILURE` with `skipFirst`.
+
+#### Plug
+
+`BTree.Plug(status = SUCCESS)` always returns `status`. It is useful as a placeholder for a branch you haven't written yet, and in tests.
+
+#### Log
+
+`BTree.Log(message)` prints `message` and returns `SUCCESS`.
+
+#### FSMConnector / GoapConnector
+
+```typescript
+BTree.FSMConnector((slot, tree) => fsm);
+BTree.GoapConnector((slot, tree) => goapAgent);
+```
+
+Run an agent's FSM or GOAP agent as a leaf. Both always return `RUNNING`, so they keep going until something halts them.
+
+- `FSMConnector` calls the FSM's `Start()` when it starts, `Update(dt)` every frame, and `Stop()` when halted.
+- `GoapConnector` calls the GOAP agent's `Update(dt)` every frame and `Reset()` when halted.
+
+They take a function instead of the FSM itself because the node is shared, while each agent has its own FSM:
 
 ```typescript
 const fsms = tree.Field<FSM.FSM>();
 BTree.FSMConnector((slot) => fsms.get(slot)!);
 ```
 
-## BehaviorTree
+---
 
-| Member                             | Description                                                                                                                      |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `new BehaviorTree(root, options?)` | Creates a tree over a built root node. `options.external_ids: true` switches to external-id mode.                                |
-| `UsesExternalIds()`                | Whether the tree is in external-id mode.                                                                                         |
-| `AddAgent(id?)`                    | Adds an agent and returns its slot. Allocating mode: no argument. External-id mode: the entity id; throws if it is already live. |
-| `RemoveAgent(slot)`                | Halts everything running for the agent, clears its entry in every node and registered field, frees the slot.                     |
-| `Tick(dt)`                         | Ticks every live agent once. Not allowed from a halt or removal callback (on a `TickAgent`-driven tree, `TickAgent` of another agent is). |
-| `TickAgent(slot, dt)`              | Ticks one agent, for a driver with its own loop (the FSM / GOAP connectors). Each call is one frame for that agent. See below.   |
-| `GetStatus(slot)`                  | Root status of the agent from the latest tick, or `undefined`.                                                                   |
-| `Halt(slot)` / `HaltAll()`         | Halt an agent (or all) without removing it; it restarts from the root next tick. Not allowed during `Tick`.                      |
-| `Field<T>(cleanup?)`               | Creates and registers a per-agent `Map<Slot, T>`; `cleanup(slot, value)` runs on removal when the agent has a value.             |
-| `RegisterField(map, cleanup?)`     | Registers an existing per-agent map so `RemoveAgent` clears it, with the same optional cleanup.                                  |
-| `OnAgentRemoved(callback)`         | Registers `callback(slot, tree)`, run for every removed agent after halting and before its fields are cleared.                   |
-| `HasAgent(slot)`                   | Whether the slot is live.                                                                                                        |
-| `GetAgents()`                      | Live slots in tick order. Do not modify.                                                                                         |
-| `GetAgentCount()`                  | Number of live agents.                                                                                                           |
-| `GetRoot()`                        | The root node.                                                                                                                   |
-| `TickCount`                        | Number of ticks so far. Nodes stamp per-agent state with it; do not modify.                                                      |
+## BehaviorTree API
+
+| Member                             | Description                                                                                                                           |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `new BehaviorTree(root, options?)` | Creates a tree from a built root node. Pass `{ external_ids: true }` to [use your own ids](#using-your-own-ids-ecs).                  |
+| `AddAgent(id?)`                    | Adds an agent and returns its slot. Takes no argument, or the entity id in external-id mode (throws if it is already added).          |
+| `RemoveAgent(slot)`                | Halts the agent, clears its state in every node and registered field, and frees the slot. [Details](#what-removeagent-does-in-order). |
+| `Tick(dt)`                         | Ticks every agent once.                                                                                                               |
+| `TickAgent(slot, dt)`              | Ticks one agent and returns its status. See [Tick or TickAgent](#tick-or-tickagent-not-both).                                         |
+| `GetStatus(slot)`                  | The root's status from the agent's latest tick. `undefined` before its first tick and after a halt.                                   |
+| `Halt(slot)` / `HaltAll()`         | Interrupts one agent (or all) without removing it; it starts over from the root on its next tick. Throws during a tick.               |
+| `Field<T>(cleanup?)`               | Creates and registers a per-agent `Map<Slot, T>`. `cleanup(slot, value)` runs on removal if the agent has a value.                    |
+| `RegisterField(map, cleanup?)`     | Registers a per-agent map you already have, with the same optional cleanup.                                                           |
+| `OnAgentRemoved(callback)`         | Registers `callback(slot, tree)`, called for every removed agent while its field values are still readable.                           |
+| `HasAgent(slot)`                   | Whether the agent is in the tree.                                                                                                     |
+| `GetAgents()`                      | The slots of all agents, in tick order: the tree's own list, so don't modify it ([removing in a loop](#agents-and-slots)).            |
+| `GetAgentCount()`                  | The number of agents.                                                                                                                 |
+| `UsesExternalIds()`                | Whether the tree was created with `external_ids: true`.                                                                               |
+| `GetRoot()`                        | The root node.                                                                                                                        |
+| `TickCount`                        | The frame counter nodes use to tell whether they were ticked last frame. Don't modify it.                                             |
+
+`DetachRunning` and `HaltChild` are for custom nodes; see [custom-nodes.md](custom-nodes.md).
+
+---
+
+## Rules and edge cases
+
+### Build each node once per position
+
+A node stores every agent's progress inside itself. That gives two rules:
+
+- **Don't place the same node object at two positions in a tree.** Both positions would share one copy of each agent's progress. Build it twice instead; a small factory function makes that easy:
+
+  ```typescript
+  const makeAttack = () => BTree.Cooldown(2, BTree.Action(attack));
+
+  BTree.Fallback(
+  	BTree.Sequence(BTree.Condition(seesPlayer), makeAttack()),
+  	BTree.Sequence(BTree.Condition(heardNoise), makeAttack()),
+  );
+  ```
+
+- **Don't share a node between two trees.** Both trees hand out slots 1, 2, 3…, so their agents would overwrite each other's progress, and `RemoveAgent` on one tree would clear the other tree's agent. Build a separate copy for each tree. (Two external-id trees whose ids never overlap are the one safe exception.)
 
 ### Tick or TickAgent, not both
 
-An agent is driven by `Tick()` or by `TickAgent()` for its whole life, never both. The two keep separate tick stamps (`Tick()` counts frames of the tree, `TickAgent()` counts frames of that agent), so nodes that compare stamps between visits (`MemorySequence`, `OneShot`, `WaitGate`, `WasFieldUpdated`) read a driver switch as a gap in visits: a `MemorySequence` drops its cursor without halting the child that was running there, which then never receives `OnHalt`. Children detached by `FireAndForget` / `RunningGate` / `Scope` are swept only by the end of frame of the driver that detached them, so after a switch they are halted late or not at all. Since `Tick()` ticks every live agent, a tree that is ticked with `Tick()` cannot also have `TickAgent()`-driven agents; use one driver per tree. That includes nested calls: on a `Tick()`-driven tree, do not call `TickAgent()` from a halt or removal callback either, even for another agent. The nested call stamps that agent's detached children with its own per-agent counter, and the sweep at the end of the `Tick()` frame then halts children the agent visited every frame. Calling `TickAgent()` of another agent from such a callback is fine only on a tree driven by `TickAgent()`. If an agent must change drivers, `Halt(slot)` it first so it restarts from the root under the new one.
+- `tree.Tick(dt)` ticks every agent. Most games call it once per frame.
+- `tree.TickAgent(slot, dt)` ticks a single agent, for when something else runs the update loop. The FSM `BehaviorTreeConnector` and the GOAP `BTConnector` use it. Each call counts as one frame for that agent.
+
+Pick one per tree:
+
+- Don't call `tree.Tick()` on a tree whose agents are driven by `TickAgent()`. `Tick()` ticks every agent, including those.
+- Don't move an agent from one to the other. If you have to, call `tree.Halt(slot)` first, so the agent starts over under the new one.
+- On a tree driven by `Tick()`, don't call `TickAgent()` from a halt or removal callback, not even for another agent.
+
+The reason: the two count frames separately. Nodes that remember whether they were ticked last frame (`MemorySequence`, `OneShot`, `WaitGate`, `WasFieldUpdated`, and `FireAndForget`, `RunningGate`, `Scope` and `Scoped`, which track children they leave running) see a switch as a gap. A `MemorySequence`, for example, then forgets its place without halting the child that was running there, and that child never gets `OnHalt`.
+
+### Calling the tree from callbacks
+
+Your callbacks and hooks receive the tree. This is what you may call while the tree is in the middle of something:
+
+| Call                            | During a tick (`Tick` / `TickAgent`)   | During a halt or removal                                                                     |
+| ------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `AddAgent`, `RemoveAgent`       | Allowed; applied after the tick's walk | Allowed; a `RemoveAgent` is applied after the current halt or removal                        |
+| `Halt`, `HaltAll`               | Throws                                 | Allowed for other agents; does nothing for the agent being halted                            |
+| `Tick`                          | Throws                                 | Throws                                                                                       |
+| `TickAgent`                     | Throws                                 | Only on a tree driven by `TickAgent`, and not for the agent being halted or removed (throws) |
+| `GetStatus`, `HasAgent`, fields | Fine                                   | Fine                                                                                         |
+
+For `TickAgent`, the end-of-frame halt of what `FireAndForget`, `RunningGate`, `Scope` and `Scoped` leave running counts as a halt of that agent, so `TickAgent` of that agent throws there. `Halt` doesn't count it: a `Halt` of that agent from there halts everything the agent has running.
+
+An agent removed during a tick still finishes that tick. Its running leaves get `OnHalt` before the `Tick` call returns. A leaf that removes its own agent should still return a status.
 
 ### What RemoveAgent does, in order
 
-1. Halts everything running for the agent (leaf `OnHalt` hooks fire), including children detached by `FireAndForget` / `RunningGate`.
-2. Clears the agent's entry in every node's state tables.
-3. Runs the `OnAgentRemoved` callbacks. Field values are still readable here.
-4. For each registered field in registration order: runs its cleanup with the value if the agent has one, then deletes the entry.
+1. Halts everything running for the agent (leaf `OnHalt` hooks fire), including children left running by `FireAndForget` or `RunningGate`.
+2. Clears the agent's state in every node.
+3. Runs the `OnAgentRemoved` callbacks. Field values can still be read here.
+4. For each registered field, in registration order: runs its cleanup with the agent's value (if it has one), then deletes the entry.
 5. Frees the slot for reuse.
 
 ### When a hook throws
 
-An error thrown by a hook never leaves the tree's own bookkeeping behind: the tree stays usable, and the first such error is rethrown by the outermost tree call (`Tick`, `TickAgent`, `Halt`, `HaltAll` or `RemoveAgent`), never by a tree call made from inside a callback (a nested `TickAgent` whose walk threw returns `FAILURE` and leaves the rethrow to the outer call).
+An error in one of your hooks never leaves the tree stuck. The tree finishes what it was doing, and then the outermost tree call (`Tick`, `TickAgent`, `Halt`, `HaltAll` or `RemoveAgent`) rethrows the first error.
 
-- At tick time (`OnTick`, `OnStart`, `OnEnter`, `OnSuccess` / `OnFailure` / `OnExit`, or an `OnHalt` fired by a mid-walk halt such as a `ReactiveSequence` switching branch), the error ends the walk of that agent for the frame: its nodes keep whatever state the walk reached, and it keeps the status of its previous tick. `Tick()` still walks the other agents, and the end-of-frame sweep and the queued adds and removals still run.
-- At halt time (`OnHalt`, `OnLeave`, an `OnAgentRemoved` callback, a field cleanup), the halt, removal or end-of-frame sweep it was part of continues: the remaining hooks still run (a `Parallel` still halts the siblings, a leaf's `OnExit` and `OnLeave` still follow its `OnHalt`), the agent is still fully halted or removed, and queued adds and removals are still applied.
+- **During a tick** (`OnTick`, `OnStart`, `OnEnter`, `OnSuccess`, `OnFailure`, `OnExit`): that agent stops for this frame and keeps the status from its previous tick. Its nodes keep whatever progress they made. The other agents are still ticked, and queued adds and removals are still applied. Because the agent stopped partway through its tick, the tree can lose track of what that agent has running. A node that started in that frame may never be halted, not even by `RemoveAgent`. A later `Halt` or `RemoveAgent` may reach a node that already finished in that frame: a leaf then gets an `OnHalt` without a run to end, or the call throws an error from inside the tree.
+- **During a halt or removal** (`OnHalt`, `OnLeave`, an `OnAgentRemoved` callback, a field cleanup): the rest of the halt or removal still happens. The remaining hooks still run, and the agent still ends up fully halted or removed. This includes an `OnHalt` caused mid-tick: a reactive composite or `WhileDoElse` switching branch, a `Timeout` running out, a `Parallel` finishing early. The halt completes, and the tick then carries on as if the hook had returned normally.
+- A `TickAgent` called from inside another tree call returns `FAILURE` if its walk throws, and leaves the rethrow to the outer call.
 
-### Adding and removing during Tick
+---
 
-`AddAgent` and `RemoveAgent` may be called from callbacks. During a tick they are queued and applied after the walk: a removed agent is still ticked to the end of the current frame, and its running leaves receive `OnHalt` inside the same `Tick` call, after the walk. A leaf that removes its own agent should still return a status for the current tick. `Halt` and `HaltAll` throw during a tick.
+## Writing custom nodes
 
-## Writing Custom Nodes
+For your own game logic you never need a custom node: `Action`, `Condition`, `Callback` and `Leaf` cover that. Write a custom node when you need **control flow** the built-ins don't have, such as a new way of choosing children or reacting to a child's status.
 
-The full guide, with a pass-through decorator, a stateful decorator, a composite with a cursor, the tick-stamp pattern, `HaltChild`, `DetachRunning`, BTCreator registration and a test recipe, is [custom-nodes.md](custom-nodes.md). The short version:
-
-A node is a table with `Name`, `Tick`, `Halt`, and `Maps`:
+A node is a plain object:
 
 ```typescript
 interface Node {
 	readonly Name: string;
 	readonly Tick: (slot: Slot, dt: number, tree: BehaviorTree) => ENodeStatus;
-	readonly Halt: (slot: Slot, tree: BehaviorTree) => void; // only called while running for that slot
+	readonly Halt: (slot: Slot, tree: BehaviorTree) => void; // only called while it is running for that slot
 	readonly Maps: Map<Slot, unknown>[]; // every per-agent table of this node and its descendants
 }
 ```
 
-The rules:
+[custom-nodes.md](custom-nodes.md) is the full guide: the rules a node must follow, five tested examples (a pass-through decorator, a decorator with state, a composite, "was I ticked last frame", a hook after a halt), leaving a child running, performance tips, BTCreator registration, and how to test a node.
 
-1. Keep per-agent state in `Map<Slot, ...>` tables captured by the closures. A missing key means idle. Reset state when a run starts, not when it ends, so a halted run cannot leak stale values.
-2. Snapshot the children's `Tick` and `Halt` functions into locals or arrays at build time and call those.
-3. `Halt` may assume the node is running for that slot. It must clear its own entries and halt the child (or children) it left running; clear first, as the built-in nodes do, so a child hook that throws leaves nothing behind. A node that halts more than one child, or runs a hook after halting one, should halt each through `tree.HaltChild(halt, slot)`: it runs the halt under `pcall` so a throwing hook does not stop the rest of the cascade (see `Parallel` in the source).
-4. `Maps` must list your own tables plus every child's `Maps`, so `RemoveAgent` can clear them.
-5. A node that reports a non-`RUNNING` status while leaving a child running must call `tree.DetachRunning(last_seen, halt, slot)` each tick (see `FireAndForget` in the source) so the tree can halt the child when the node stops being visited.
-
-A decorator that ticks its child only every N-th visit:
-
-```typescript
-function EveryNth(n: number, child: BTree.Node): BTree.Node {
-	const count = new Map<BTree.Slot, number>();
-	const child_running = new Map<BTree.Slot, true>();
-	const tick = child.Tick;
-	const halt = child.Halt;
-	return {
-		Name: "EveryNth",
-		Tick: (slot, dt, tree) => {
-			if (child_running.has(slot)) {
-				// finish the current child run before counting again
-				const s = tick(slot, dt, tree);
-				if (s !== RUNNING) child_running.delete(slot);
-				return s;
-			}
-			const c = (count.get(slot) ?? 0) + 1;
-			if (c < n) {
-				count.set(slot, c);
-				return FAILURE;
-			}
-			count.delete(slot);
-			const s = tick(slot, dt, tree);
-			if (s === RUNNING) child_running.set(slot, true);
-			return s;
-		},
-		Halt: (slot, tree) => {
-			count.delete(slot);
-			if (child_running.has(slot)) {
-				child_running.delete(slot);
-				halt(slot, tree);
-			}
-		},
-		Maps: [count, child_running, ...child.Maps],
-	};
-}
-```
+---
 
 ## Migrating from 0.3
 
-| 0.3                                            | 0.4                                                                                                 |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `new BTree.Sequence().AddChild(a).AddChild(b)` | `BTree.Sequence(a, b)`                                                                              |
-| `new BTree.Timeout(child, 10)`                 | `BTree.Timeout(10, child)` (parameters first, child last, for every decorator)                      |
-| `new BTree.BehaviorTree(root, bb)` per agent   | One `new BTree.BehaviorTree(root)`, then `AddAgent()` per agent                                     |
-| `tree.Tick(dt)` per agent                      | `tree.Tick(dt)` once for all agents                                                                 |
-| `(bb, dt) => ...` callbacks                    | `(slot, dt, tree) => ...`                                                                           |
-| `bb.Get("hp")`                                 | `hp.get(slot)` with `const hp = tree.Field<number>()`                                               |
-| `class X extends BTree.Node`                   | A factory returning `{ Name, Tick, Halt, Maps }`                                                    |
-| `FullAction({...})`                            | `Leaf({...})`                                                                                       |
-| `OnBecameActivated` / `OnBecameInactive`       | `Scope({ OnEnter, OnExit })` at the start of the branch, or `Scoped(config, subtree)`               |
-| `Switch<T>("key").Case(v, node)`               | `Switch((slot) => key.get(slot), new Map([[v, node]]), default?)`                                   |
-| `Timer("key")`                                 | `Timer(field)`                                                                                      |
-| `WasEntryUpdated(["a", "b"])`                  | `WasFieldUpdated([a, b])`                                                                           |
-| `SubTree(other)`                               | Place the subtree's root node in the parent tree directly (a built node belongs to one tree, at one position) |
-| `FSMConnector(fsm)`                            | `FSMConnector((slot) => fsms.get(slot)!)`                                                           |
-| `node.IsRunning()`                             | Not available on nodes; `tree.GetStatus(slot) === RUNNING` for the root                             |
+Version 0.4 replaced the class-based tree, which created one set of node objects per agent, with the shared tree described on this page. On the same trees it is 10–30x faster per agent, allocates nothing per tick, and uses about 30x less memory per agent. See [Performance](#performance) for the numbers.
 
-`BTCreator` builds the new trees; see [btcreator.md](btcreator.md) for the changed registration API.
+| 0.3                                            | 0.4                                                                                   |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `new BTree.Sequence().AddChild(a).AddChild(b)` | `BTree.Sequence(a, b)`                                                                |
+| `new BTree.Timeout(child, 10)`                 | `BTree.Timeout(10, child)` (settings first, child last, for every decorator)          |
+| `new BTree.BehaviorTree(root, bb)` per agent   | One `new BTree.BehaviorTree(root)`, then `AddAgent()` per agent                       |
+| `tree.Tick(dt)` per agent                      | `tree.Tick(dt)` once for all agents                                                   |
+| `(bb, dt) => ...` callbacks                    | `(slot, dt, tree) => ...`                                                             |
+| `bb.Get("hp")`                                 | `hp.get(slot)`, with `const hp = tree.Field<number>()`                                |
+| `class X extends BTree.Node`                   | A function returning `{ Name, Tick, Halt, Maps }` ([guide](custom-nodes.md))          |
+| `FullAction({...})`                            | `Leaf({...})`                                                                         |
+| `OnBecameActivated` / `OnBecameInactive`       | `Scoped({ OnEnter, OnExit }, subtree)`, or `Leaf`'s `OnEnter` / `OnLeave` (see below) |
+| `Switch<T>("key").Case(v, node)`               | `Switch((slot) => key.get(slot), new Map([[v, node]]), default?)`                     |
+| `Timer("key")`                                 | `Timer(field)`                                                                        |
+| `WasEntryUpdated(["a", "b"])`                  | `WasFieldUpdated([a, b])`                                                             |
+| `SubTree(other)`                               | Put the subtree's root node in the parent tree directly (a node belongs to one tree)  |
+| `FSMConnector(fsm)`                            | `FSMConnector((slot) => fsms.get(slot)!)`                                             |
+| `node.IsRunning()`                             | Not available on nodes. For the root, use `tree.GetStatus(slot) === RUNNING`          |
+
+**Where `OnBecameActivated` / `OnBecameInactive` went.** Tracking "was this node reached last frame" for every node is a large part of what made 0.3 slow, so it is now opt-in: wrap the part of the tree you care about in [`Scoped`](#scoped), or give a `Leaf` `OnEnter` / `OnLeave` hooks. Only agents that pass through those nodes pay for it. `MemorySequence`, `WaitGate`, `OneShot` and `WasFieldUpdated`, which used the old hooks internally, now track this themselves.
+
+`BTCreator` builds the new trees; its registration API changed too, see [btcreator.md](btcreator.md).
+
+---
 
 ## Performance
 
-Measured on the same trees in Roblox Studio (`--!optimize 2`, µs per agent per tick; `native` is `--!native`):
+Measured on the same trees in Roblox Studio (`--!optimize 2`), in µs per agent per tick; `native` means `--!native`:
 
 | Tree (agents)                | 0.3 native | 0.4 native | 0.3 interpreter | 0.4 interpreter |
 | ---------------------------- | ---------: | ---------: | --------------: | --------------: |
@@ -524,6 +749,12 @@ Measured on the same trees in Roblox Studio (`--!optimize 2`, µs per agent per 
 | 10 stacked decorators (1000) |       5.83 |       0.21 |            6.81 |            0.35 |
 | Reactive + timeout (1000)    |       2.25 |       0.09 |            3.11 |            0.14 |
 
-Garbage per agent per tick: 0.3 allocated 224–1120 bytes, 0.4 allocates 0. Memory per agent: 0.3 used 4–21 KB, 0.4 uses 0.1–0.3 KB.
+Garbage per agent per tick: 0.3 allocated 224–1120 bytes; 0.4 allocates none. Memory per agent: 0.3 used 4–21 KB; 0.4 uses 0.1–0.3 KB.
 
-What makes the difference, in order: one tree instead of one per agent; no per-tick sets (the halting rule replaces them); closures instead of metatable method dispatch; leaves specialised at build time so absent hooks cost nothing; dense slots keeping state tables in the array part.
+Where the difference comes from, largest first:
+
+1. One tree for all agents, instead of one per agent.
+2. No per-tick bookkeeping sets; the halting guarantee replaces them.
+3. Closures instead of metatable method calls.
+4. Leaves specialised when they are built, so hooks you leave out cost nothing.
+5. Dense slots, which keep the per-agent tables in Luau's fast array storage.

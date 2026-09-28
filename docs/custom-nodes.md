@@ -1,8 +1,14 @@
 # Writing Custom Behavior Tree Nodes
 
-How to add your own composites and decorators to `BTree`. For leaves you never need this: `Leaf`, `Action`, `Condition` and `Callback` cover user code that runs per tick. Custom nodes are for **control flow** the built-ins don't have: a different way of choosing children, a different way of reacting to a child's status, a node that keeps its own per-agent counters or timers.
+This guide shows how to write your own composites and decorators for `BTree`.
 
-Every complete node in this guide is copied from [`src/tests/CustomNodes.test.ts`](../src/tests/CustomNodes.test.ts), where it is run by the test suite.
+**Do you need one?** Not for game logic. `Action`, `Condition`, `Callback` and `Leaf` can run any code you like. Write a custom node when you need **control flow** the built-ins don't have: a new way of choosing which child runs, a new way of reacting to a child's status, or a node that keeps its own per-agent counters or timers.
+
+Read [behavior-tree.md](behavior-tree.md) first, especially [Interruptions (halting)](behavior-tree.md#interruptions-halting). Most of what makes a custom node correct is getting halting right.
+
+Every complete node in this guide is copied from [`src/tests/CustomNodes.test.ts`](../src/tests/CustomNodes.test.ts), where the test suite runs it.
+
+**In this guide:** [the shape of a node](#the-shape-of-a-node) · [the contract](#the-contract) · examples: [pass-through decorator](#example-1-a-pass-through-decorator), [decorator with state](#example-2-a-decorator-with-per-agent-state), [composite](#example-3-a-composite-with-a-cursor), [was I ticked last frame](#example-4-was-i-visited-last-tick), [hook after a halt](#example-5-a-hook-after-halting-a-child-haltchild) · [leaving a child running](#leaving-a-child-running-detachrunning) · [performance](#performance-notes) · [BTCreator](#registering-a-node-with-btcreator) · [testing](#testing-a-node) · [checklist](#checklist)
 
 ---
 
@@ -43,7 +49,7 @@ These are the rules the tree relies on. Break one and the symptom is usually a l
 
 **2. `Halt` is called only while you are running for that slot.** So `Halt` may assume its state is there: `cursor.get(slot)!` is fine. It must halt the child (or children) you left running and clear your own entries. Clear first, then halt, so a child hook that throws leaves nothing behind in your tables.
 
-**3. The halting rule.** If a child was running at the end of a tick, then in the next tick you either tick it again or halt it. Never neither. A node that decides not to tick its running child (a gate that closed, a selector that chose another branch) halts it right there, in the same `Tick`. The tree does this from the root on `Halt` / `RemoveAgent`; between those, it is your job. The exception is a node that *deliberately* leaves a child running while reporting a non-`RUNNING` status; see [DetachRunning](#leaving-a-child-running-detachrunning).
+**3. The halting rule.** If a child was running at the end of a tick, then in the next tick you either tick it again or halt it. Never neither. A node that decides not to tick its running child (a gate that closed, a selector that chose another branch) halts it right there, in the same `Tick`, through `tree.HaltChild` (see [Example 5](#example-5-a-hook-after-halting-a-child-haltchild)). The tree does this from the root on `Halt` / `RemoveAgent`; between those, it is your job. The exception is a node that *deliberately* leaves a child running while reporting a non-`RUNNING` status; see [DetachRunning](#leaving-a-child-running-detachrunning).
 
 **4. `Maps` lists every per-agent table of yours plus every child's `Maps`.** `RemoveAgent` walks this list and deletes the agent's key from each. Forget one and a recycled slot inherits the old agent's state.
 
@@ -75,7 +81,7 @@ function Trace(label: string, child: BTree.Node, out: string[]): BTree.Node {
 }
 ```
 
-The invariant that makes this correct: `Trace` is `RUNNING` if and only if its child is. So when the tree halts `Trace`, the child is running and `child.Halt` is the right thing to call; passing the child's `Halt` through directly is the whole implementation. `Inverter`, `ForceSuccess` and `Log` in the built-ins are this shape.
+The invariant that makes this correct: `Trace` is `RUNNING` if and only if its child is. So when the tree halts `Trace`, the child is running and `child.Halt` is the right thing to call; passing the child's `Halt` through directly is the whole implementation. `Inverter`, `ForceSuccess` and `ForceFailure` in the built-ins are this shape.
 
 ---
 
@@ -93,9 +99,10 @@ function Gate(pred: (slot: BTree.Slot, tree: BTree.BehaviorTree) => boolean, chi
 		Tick: (slot, dt, tree) => {
 			if (!pred(slot, tree)) {
 				// Closing the gate on a running child: we stop ticking it, so we must halt it (halting rule).
+				// Guarded, so a throwing hook in the child cannot unwind our Tick before we return FAILURE.
 				if (child_running.has(slot)) {
 					child_running.delete(slot);
-					halt(slot, tree);
+					tree.HaltChild(halt, slot);
 				}
 				return FAILURE;
 			}
@@ -114,7 +121,7 @@ function Gate(pred: (slot: BTree.Slot, tree: BTree.BehaviorTree) => boolean, chi
 }
 ```
 
-Two things to notice. `child_running` exists only for the "gate closes while the child runs" case: without it the node could not know whether there is anything to halt. And the `Halt` path deletes its entry before halting the child (rule 2), so if the child's `OnHalt` throws, `Gate` has already left a clean state.
+Three things to notice. `child_running` exists only for the "gate closes while the child runs" case: without it the node could not know whether there is anything to halt. The `Halt` path deletes its entry before halting the child (rule 2), so if the child's `OnHalt` throws, `Gate` has already left a clean state. And the halt in `Tick` goes through [`tree.HaltChild`](#example-5-a-hook-after-halting-a-child-haltchild): if the child's `OnHalt` throws there, `Gate` still returns `FAILURE`, so its parent knows it has stopped running.
 
 Why not `Sequence(Condition(pred), child)`? A plain `Sequence` resumes at its running child without re-checking earlier ones; `ReactiveSequence(Condition(pred), child)` does re-check, and is what you would normally use. `Gate` is the same behaviour written as a decorator, which is the point of the example.
 
@@ -218,7 +225,7 @@ function OnInterrupt(callback: (slot: BTree.Slot, tree: BTree.BehaviorTree) => v
 }
 ```
 
-Use `HaltChild` when you halt **more than one** child in a row (as `Parallel` does: a throw in the first would otherwise skip the rest), or when **code of yours follows** the halt. When `Halt` does nothing but halt one child, call the child's `Halt` directly: the cascade above you is already guarded, and the `pcall` would be wasted.
+Use `HaltChild` when you halt **more than one** child in a row (as `Parallel` does: a throw in the first would otherwise skip the rest), when **code of yours follows** the halt, and for **every halt your `Tick` makes** (a gate closing, a switch to another child, a time limit). A throw there would unwind your `Tick` and every `Tick` above it, so neither you nor your parents would record what changed: your parent would still count you as running and halt you again later. When `Halt` does nothing but halt one child, call the child's `Halt` directly: the cascade above you is already guarded, and the `pcall` would be wasted. The `pcall` in a `Tick` costs nothing in steady state, because it only runs when a child is actually halted.
 
 Note `Tick: tick`. When your node adds nothing on the tick path, hand the child's function through instead of wrapping it; that is the difference between a free node and one that costs a call per visit.
 
@@ -266,17 +273,9 @@ This costs about 90 ns per visit natively in Studio (roughly eight plain node vi
 
 ## Calling the tree from inside a node
 
-Your `Tick` and `Halt` receive the tree, and hooks you run receive it too. What is allowed while the tree is inside a call:
+Your `Tick` and `Halt` receive the tree, and so do the hooks you run. What you may call while the tree is in the middle of a tick, halt or removal is listed in [Calling the tree from callbacks](behavior-tree.md#calling-the-tree-from-callbacks); the same rules apply inside a node.
 
-| Call | During `Tick` / `TickAgent` | During a halt or removal cascade |
-| --- | --- | --- |
-| `AddAgent`, `RemoveAgent` | queued, applied after the walk | queued, applied after the cascade |
-| `Halt`, `HaltAll` | throws | allowed for another agent; a no-op for the one being halted |
-| `Tick` | throws | throws |
-| `TickAgent` | throws | allowed for another agent on a `TickAgent`-driven tree; throws for the agent being removed |
-| `GetStatus`, `HasAgent`, fields | fine | fine |
-
-An error thrown from your node or from a hook it runs does not corrupt the tree: the walk, halt or removal it interrupted completes and the outermost tree call rethrows the first error. The full rules are under "When a hook throws" in [behavior-tree.md](behavior-tree.md#when-a-hook-throws). Prefer not to throw from tick paths anyway; the agent whose walk threw keeps the state its walk reached, and only its next tick moves it on.
+An error thrown from your node or from a hook it runs does not corrupt the tree: the walk, halt or removal it interrupted completes and the outermost tree call rethrows the first error. The full rules are under "When a hook throws" in [behavior-tree.md](behavior-tree.md#when-a-hook-throws). Prefer not to throw from tick paths anyway. The agent whose walk threw keeps the state its walk reached, and only its next tick moves it on. Until then, the nodes above the throw haven't recorded what changed below them, so a node started in that frame can go unhalted.
 
 ---
 
@@ -295,7 +294,7 @@ function Countdown(seconds: number, child: BTree.Node, on_expire?: (slot: BTree.
 }
 ```
 
-And when a configuration makes your node a no-op, return the child itself: `Repeat(1, child)` has nothing to add, so returning `child` gives a tree with one node fewer. `Leaf` does exactly this: a leaf with only `OnTick` *is* the user's function, with no wrapper and no state.
+And when a configuration makes your node a no-op, return the child itself: `RoundRobin` with a single child always picks that child, so returning `child` gives a tree with one node fewer. `Leaf` does exactly this: a leaf with only `OnTick` *is* the user's function, with no wrapper and no state.
 
 ---
 
@@ -352,7 +351,7 @@ Run the suite under Lune without Studio: `bun run build && bun x rbxtsc -p tscon
 
 - [ ] Per-agent state is in `Map<Slot, ...>` tables captured by the closures; absent key = idle.
 - [ ] Children's `Tick` / `Halt` are snapshotted at build time.
-- [ ] `Tick` halts any running child it decides not to tick again (or uses `DetachRunning` on purpose).
+- [ ] `Tick` halts any running child it decides not to tick again, with `HaltChild` (or uses `DetachRunning` on purpose).
 - [ ] `Halt` clears own entries first, then halts the running child; `HaltChild` if more than one thing is halted or code follows.
 - [ ] `Maps` lists every own table and every child's `Maps`.
 - [ ] Nothing allocates per tick; hot loops are `while` loops; statuses are returned from constants.
